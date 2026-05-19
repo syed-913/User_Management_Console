@@ -5,6 +5,12 @@
 ### Umask is set to 0077 for better security upon file creation such as logs, backups etc.
 umask 0077
 
+### Dry Run Mode — preview changes without modifying any files
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=true
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  TERMINAL & COLOR CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -206,7 +212,11 @@ prompt_continue() {
 clear
 draw_line "═"
 printf '  %bU S E R   M A N A G E M E N T   C O N S O L E%b\n' "${C_BOLD}${C_WHITE}" "$C_RESET"
-printf '  %b[ VERSION 1.0 ]   INITIALIZING...%b\n' "$C_DIM" "$C_RESET"
+if [[ "$DRY_RUN" == true ]]; then
+  printf '  %b[ VERSION 1.0 ]   INITIALIZING... (DRY RUN MODE)%b\n' "${C_YELLOW}${C_BOLD}" "$C_RESET"
+else
+  printf '  %b[ VERSION 1.0 ]   INITIALIZING...%b\n' "$C_DIM" "$C_RESET"
+fi
 draw_line "═"
 printf '\n'
 
@@ -223,7 +233,7 @@ fi
 
 ### Base Directory (Defaults to root or /) to locate sub-directories such as etc, var, tmp.
 
-BASE_DIR="/"
+BASE_DIR="/home/vagrant"
 
 ### Checking if the file exist in it's respective location
 
@@ -337,14 +347,24 @@ BACKUP_MECHANISM () {
   local backup_archive
   backup_archive=$BASE_DIR/var/backups/umc/umc_backup.tar.gz.$(date +%F_%H-%M-%S)
   mkdir -p $BASE_DIR/var/backups/umc 
-  tar -czPf "$backup_archive" $BASE_DIR/etc/{passwd,shadow,group,gshadow} 
+  tar -czPf "$backup_archive" $BASE_DIR/etc/{passwd,shadow,group,gshadow} 2>/dev/null
   chmod 400 "$backup_archive"
   task_status "Creating backup archive" "DONE" "Read-only, timestamped"
+}
+
+BACKUP_ROTATION () {
+  local backup_dir="$BASE_DIR/var/backups/umc"
+  if [[ -d "$backup_dir" ]]; then
+     find "$backup_dir" -type f -name "*.tar.gz" -mtime +30 -exec rm {} \; 2>/dev/null
+     task_status "Rotating old backups" "DONE"
+  fi
 }
 
 OS_DETECTION
 
 LOCK_CHECK
+
+BACKUP_ROTATION
 
 printf '\n'
 draw_line "═"
@@ -375,13 +395,40 @@ atomic_commit() {
     fi
   done
 
+  if command -v pwck >/dev/null 2>&1; then
+    if [[ -f "$BASE_DIR/tmp/passwd" && -f "$BASE_DIR/tmp/shadow" ]]; then
+       if pwck -r "$BASE_DIR/tmp/passwd" "$BASE_DIR/tmp/shadow" 2>&1 | grep -Eiq "invalid|error|bad"; then
+          file_check=false
+       fi
+    fi
+  fi
+  
+  if command -v grpck >/dev/null 2>&1; then
+    if [[ -f "$BASE_DIR/tmp/group" && -f "$BASE_DIR/tmp/gshadow" ]]; then
+       if grpck -r "$BASE_DIR/tmp/group" "$BASE_DIR/tmp/gshadow" 2>&1 | grep -Eiq "invalid|error|bad"; then
+          file_check=false
+       fi
+    fi
+  fi
+
   if $file_check; then
     task_status "Verifying integrity of temporary files" "DONE"
+    
+    if [[ "$DRY_RUN" == true ]]; then
+       printf "\n  %b[ DRY RUN MODE ] Displaying changes:%b\n" "$C_YELLOW" "$C_RESET"
+       for f in "${files_to_check[@]}"; do
+         local dest="${f/\/tmp\//\/etc\/}"
+         diff --color=always -u "$dest" "$f" | sed 's/^/    /' || true
+       done
+       printf "\n"
+       LOGGING_MECHANISM "user.info" "UMC: Dry run simulated for action: $user_msg."
+       return 0
+    fi
+    
     task_status "Performing atomic move" "WAIT"
     
     for f in "${files_to_check[@]}"; do
-      local dest
-      dest=$(echo "$f" | sed "s|/tmp/|/etc/|")
+      local dest="${f/\/tmp\//\/etc\/}"
       mv "$f" "$dest"
     done
     
@@ -415,6 +462,26 @@ validate_group_exists() {
     show_error "Group '$gname' does not exist."
     return 1
   fi
+}
+
+prompt_for_existing_user() {
+  read -rt 180 -p "  Enter Username: " TARGET_USER
+  TARGET_USER=${TARGET_USER//[^a-zA-Z0-9_-]/}
+  if ! validate_user_exists "$TARGET_USER"; then
+     prompt_continue
+     return 1
+  fi
+  return 0
+}
+
+prompt_for_existing_group() {
+  read -rt 180 -p "  Enter Group Name: " TARGET_GROUP
+  TARGET_GROUP=${TARGET_GROUP//[^a-zA-Z0-9_-]/}
+  if ! validate_group_exists "$TARGET_GROUP"; then
+     prompt_continue
+     return 1
+  fi
+  return 0
 }
 
 USER_ACTIONS () {
@@ -483,12 +550,14 @@ USER_ACTIONS () {
     task_status "Preparing user creation" "DONE"
     
     if atomic_commit "Create user $username" $BASE_DIR/tmp/{passwd,group,shadow,gshadow}; then
-      task_status "Provisioning Environment" "WAIT"
-      mkdir -p $BASE_DIR/home/"$username" && cp -r $BASE_DIR/etc/skel/. $BASE_DIR/home/"$username" && chown -R $new_uid:$new_uid $BASE_DIR/home/"$username" && chmod 700 $BASE_DIR/home/"$username"
-      if [[ "$SYSTEM_TYPE" == "rhel" ]]; then
-        restorecon -R $BASE_DIR/home/"$username" >/dev/null 2>&1
+      if [[ "$DRY_RUN" != true ]]; then
+        task_status "Provisioning Environment" "WAIT"
+        mkdir -p $BASE_DIR/home/"$username" && cp -r $BASE_DIR/etc/skel/. $BASE_DIR/home/"$username" && chown -R $new_uid:$new_uid $BASE_DIR/home/"$username" && chmod 700 $BASE_DIR/home/"$username"
+        if [[ "$SYSTEM_TYPE" == "rhel" ]]; then
+          restorecon -R $BASE_DIR/home/"$username" >/dev/null 2>&1
+        fi
+        task_status "Provisioning Environment" "DONE"
       fi
-      task_status "Provisioning Environment" "DONE"
       printf "\n"
       show_success "User $username has been created successfully"
     else
@@ -499,9 +568,8 @@ USER_ACTIONS () {
   modify_account_properties () {
     draw_header "[1] USER ACTIONS > [B] MODIFY ACCOUNT"
     draw_progress "MODIFY ACCOUNT PROPERTIES"
-    read -rt 180 -p "  Enter Username: " INPUT
-    local username=${INPUT//[^a-zA-Z0-9_-]/}
-    if ! validate_user_exists "$username"; then prompt_continue; return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local username="$TARGET_USER"
 
     change_default_shell () {
       draw_progress "CHANGING DEFAULT SHELL"
@@ -543,16 +611,18 @@ USER_ACTIONS () {
       task_status "Preparing file modification" "DONE"
       
       if atomic_commit "Change home dir for $username" $BASE_DIR/tmp/passwd; then
-         task_status "Moving home directory contents" "WAIT"
-         if [[ -d "$BASE_DIR$old_home" ]]; then
-            mkdir -p "$(dirname "$BASE_DIR$new_home")"
-            mv "$BASE_DIR$old_home" "$BASE_DIR$new_home"
-         else
-            mkdir -p "$BASE_DIR$new_home"
-            cp -r $BASE_DIR/etc/skel/. "$BASE_DIR$new_home"
-            chown -R "$username":"$username" "$BASE_DIR$new_home"
+         if [[ "$DRY_RUN" != true ]]; then
+           task_status "Moving home directory contents" "WAIT"
+           if [[ -d "$BASE_DIR$old_home" ]]; then
+              mkdir -p "$(dirname "$BASE_DIR$new_home")"
+              mv "$BASE_DIR$old_home" "$BASE_DIR$new_home"
+           else
+              mkdir -p "$BASE_DIR$new_home"
+              cp -r $BASE_DIR/etc/skel/. "$BASE_DIR$new_home"
+              chown -R "$username":"$username" "$BASE_DIR$new_home"
+           fi
+           task_status "Moving home directory contents" "DONE"
          fi
-         task_status "Moving home directory contents" "DONE"
          printf "\n"
          show_success "Home directory updated successfully"
       fi
@@ -593,8 +663,8 @@ USER_ACTIONS () {
   reset_password () {
     draw_header "[1] USER ACTIONS > [C] RESET PASSWORD"
     draw_progress "RESET OR CHANGE USER PASSWORD"
-    read -rt 180 -p "  Enter Username: " username
-    if ! validate_user_exists "$username"; then prompt_continue; return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local username="$TARGET_USER"
 
     read -rst 180 -p "  New Password: " input_pass
     echo
@@ -615,8 +685,8 @@ USER_ACTIONS () {
   lock_unlock_user_account () {
     draw_header "[1] USER ACTIONS > [D] LOCK / UNLOCK"
     draw_progress "LOCK OR UNLOCK USER ACCOUNT"
-    read -rt 180 -p "  Enter Username: " username
-    if ! validate_user_exists "$username"; then prompt_continue; return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local username="$TARGET_USER"
 
     local current_hash
     current_hash=$(awk -F: -v u="$username" '$1==u {print $2}' $BASE_DIR/etc/shadow)
@@ -647,8 +717,8 @@ USER_ACTIONS () {
   set_account_expiry () {
     draw_header "[1] USER ACTIONS > [E] SET EXPIRY"
     draw_progress "SET ACCOUNT EXPIRY DATE"
-    read -rt 180 -p "  Enter Username: " username
-    if ! validate_user_exists "$username"; then prompt_continue; return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local username="$TARGET_USER"
 
     read -rt 180 -p "  Enter Expiry Date (YYYY-MM-DD) or 'never': " exp_date
     local exp_days=""
@@ -675,8 +745,8 @@ USER_ACTIONS () {
   deploy_ssh_public_key () {
     draw_header "[1] USER ACTIONS > [F] DEPLOY SSH KEY"
     draw_progress "DEPLOY SSH PUBLIC KEY"
-    read -rt 180 -p "  Enter Username: " username
-    if ! validate_user_exists "$username"; then prompt_continue; return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local username="$TARGET_USER"
 
     read -rt 180 -p "  Paste Public Key string: " pub_key
     if [[ -z "$pub_key" ]]; then
@@ -705,22 +775,24 @@ USER_ACTIONS () {
   delete_user () {
     draw_header "[1] USER ACTIONS > [G] DELETE USER"
     draw_progress "DELETE USER (SAFE ARCHIVE)"
-    read -rt 180 -p "  Enter Username: " username
-    if ! validate_user_exists "$username"; then prompt_continue; return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local username="$TARGET_USER"
 
     prompt_confirm "Are you sure you want to delete user $username?"
     if [[ "$CONFIRMED" == true ]]; then
-       task_status "Archiving Home Directory" "WAIT"
-       local homedir
-       homedir=$(awk -F: -v u="$username" '$1==u {print $6}' $BASE_DIR/etc/passwd)
-       local archive_path
-       archive_path="$BASE_DIR/var/backups/umc/${username}_home_$(date +%F).tar.gz"
-       mkdir -p "$BASE_DIR/var/backups/umc"
-       if [[ -d "$BASE_DIR$homedir" ]]; then
-          tar -czf "$archive_path" -C "$(dirname "$BASE_DIR$homedir")" "$(basename "$BASE_DIR$homedir")" 2>/dev/null
-          rm -rf "$BASE_DIR$homedir"
+       if [[ "$DRY_RUN" != true ]]; then
+         task_status "Archiving Home Directory" "WAIT"
+         local homedir
+         homedir=$(awk -F: -v u="$username" '$1==u {print $6}' $BASE_DIR/etc/passwd)
+         local archive_path
+         archive_path="$BASE_DIR/var/backups/umc/${username}_home_$(date +%F).tar.gz"
+         mkdir -p "$BASE_DIR/var/backups/umc"
+         if [[ -d "$BASE_DIR$homedir" ]]; then
+            tar -czf "$archive_path" -C "$(dirname "$BASE_DIR$homedir")" "$(basename "$BASE_DIR$homedir")" 2>/dev/null
+            rm -rf "$BASE_DIR$homedir"
+         fi
+         task_status "Archiving Home Directory" "DONE" "Saved to $archive_path"
        fi
-       task_status "Archiving Home Directory" "DONE" "Saved to $archive_path"
 
        task_status "Preparing file removals" "WAIT"
        cp $BASE_DIR/etc/{passwd,shadow,group,gshadow} $BASE_DIR/tmp/
@@ -802,11 +874,11 @@ GROUP_ACTIONS () {
     draw_header "[2] GROUP ACTIONS > [B] MODIFY MEMBERSHIP"
     draw_progress "ADD OR REMOVE USER FROM GROUP"
     
-    read -rt 180 -p "  Enter Group Name: " gname
-    if ! validate_group_exists "$gname"; then return 1; fi
+    if ! prompt_for_existing_group; then return 1; fi
+    local gname="$TARGET_GROUP"
 
-    read -rt 180 -p "  Enter Username: " uname
-    if ! validate_user_exists "$uname"; then return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local uname="$TARGET_USER"
 
     printf "  %bSelect action:%b\n" "$C_WHITE" "$C_RESET"
     printf "    %b[A]%b dd user to group\n" "$C_CYAN" "$C_RESET"
@@ -850,8 +922,8 @@ GROUP_ACTIONS () {
     draw_header "[2] GROUP ACTIONS > [C] REMOVE GROUP"
     draw_progress "DELETE A SYSTEM GROUP"
     
-    read -rt 180 -p "  Enter Group Name: " gname
-    if ! validate_group_exists "$gname"; then return 1; fi
+    if ! prompt_for_existing_group; then return 1; fi
+    local gname="$TARGET_GROUP"
 
     local gid
     gid=$(awk -F: -v g="$gname" '$1==g {print $3}' "$BASE_DIR/etc/group")
@@ -881,10 +953,17 @@ GROUP_ACTIONS () {
     draw_header "[2] GROUP ACTIONS > [D] CONFIGURE SUDOERS"
     draw_progress "GRANT SUDO PRIVILEGES"
     
-    read -rt 180 -p "  Enter Username: " uname
-    if ! validate_user_exists "$uname"; then return 1; fi
+    if ! prompt_for_existing_user; then return 1; fi
+    local uname="$TARGET_USER"
 
-    prompt_confirm "Grant passwordless sudo to $uname?"
+    prompt_confirm "Grant sudo privileges to $uname?"
+    if [[ "$CONFIRMED" == false ]]; then
+       printf "\n"
+       show_error "Operation aborted."
+       return 1
+    fi
+
+    prompt_confirm "Make it passwordless (NOPASSWD)?"
     local sudo_line=""
     if [[ "$CONFIRMED" == true ]]; then
        sudo_line="$uname ALL=(ALL) NOPASSWD:ALL"
@@ -992,19 +1071,19 @@ SECURITY_AND_AUDIT () {
     task_status "Checking for discrepancies" "WAIT"
     local out_of_sync=false
     
-    for u in $(awk -F: '{print $1}' "$BASE_DIR/etc/passwd"); do
+    while read -r u; do
       if ! grep -q "^$u:" "$BASE_DIR/etc/shadow"; then
          printf "  %bISSUE:%b User %s missing from shadow file.\n" "$C_RED" "$C_RESET" "$u"
          out_of_sync=true
       fi
-    done
+    done < <(awk -F: '{print $1}' "$BASE_DIR/etc/passwd")
 
-    for u in $(awk -F: '{print $1}' "$BASE_DIR/etc/shadow"); do
+    while read -r u; do
       if ! grep -q "^$u:" "$BASE_DIR/etc/passwd"; then
          printf "  %bISSUE:%b User %s missing from passwd file.\n" "$C_RED" "$C_RESET" "$u"
          out_of_sync=true
       fi
-    done
+    done < <(awk -F: '{print $1}' "$BASE_DIR/etc/shadow")
 
     if $out_of_sync; then
        task_status "Checking for discrepancies" "FAIL"
