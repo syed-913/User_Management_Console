@@ -1,1 +1,9 @@
+# Vagrant machine state
 .vagrant/
+
+# Test tooling fetched on demand (pinned bats-core) and throw-away sandboxes
+tests/.cache/
+tests/.sandbox/
+
+# Evidence runs write raw logs here before they are summarised into evidence/
+poc/.out/
