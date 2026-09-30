@@ -9,7 +9,7 @@ setup_file() {
 }
 ssh_as() { ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "$1@127.0.0.1" true 2>/dev/null; }
 
-@test "E-16: SELinux labels of the account files stay correct after commits" {
+@test "F-03 / E-16: SELinux labels of the account files stay correct after commits" {
     command -v getenforce >/dev/null && [ "$(getenforce)" = Enforcing ] || skip "SELinux is not enforcing here"
     umc_live user create e2e.selinux >/dev/null
     umc_live user lock e2e.selinux >/dev/null

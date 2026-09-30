@@ -114,6 +114,12 @@ teardown() { drop_sandbox; }
     [ "$output" = OK ]
 }
 
+@test "F-33: the password policy works in the C locale (no locale-dependent ranges)" {
+    run env LANG=C LC_ALL=C bash -c 'source "$1"; OPT_ROOT=$2; paths_init; cfg_resolve; LIVE=false; pw_check "Str0ng-Enough!pw" alice && echo OK' _ "$UMC" "$SB"
+    [ "$output" = OK ]
+    ! grep -nE '\[[^]]*\\\+\\-\$' "$UMC"                     # v1's broken bracket expression is gone
+}
+
 @test "F-15: an empty password is refused before anything is hashed" {
     run ufn 'LIVE=false; pw_check "" alice || echo "NO: $VAL_ERR"'
     contains "empty"

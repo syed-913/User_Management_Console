@@ -336,3 +336,10 @@ These show that the protections are not theoretical. Each became a test:
 10. **Locale-dependent regular expressions** (F-33): v1's password rule
     `[\,\.\+\-$…]` only works where collation happens to make `\`–`$` a valid
     range. `LC_ALL=C` everywhere, and no ranges between punctuation.
+11. **A success that recovery would have undone** ([E-06](../evidence/E-06-disk-full.md)):
+    with 136 KB free, the commit completed but *recording* `state=committed`
+    in the journal failed, unchecked. UMC exited 0, and the next run's crash
+    recovery saw "committing" and rolled the finished transaction back. Every
+    journal state is now written at journal time and later only renamed into
+    place (no free space needed), and every transition is checked: UMC can
+    fail, but it can no longer report a success the journal disagrees with.

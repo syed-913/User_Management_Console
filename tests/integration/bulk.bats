@@ -91,7 +91,7 @@ teardown() { drop_sandbox; }
     grep -q 'row 3' "$SB/mixed.rejects.txt"
 }
 
-@test "plain-text passwords in a file are refused unless explicitly allowed" {
+@test "F-16: plain-text passwords in a file are refused unless explicitly allowed" {
     printf 'username,password\nx.user,Secret123!\n' > "$SB/pw.csv"
     run umc --yes apply -f "$SB/pw.csv"
     expect 3

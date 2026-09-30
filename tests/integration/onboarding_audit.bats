@@ -51,7 +51,7 @@ teardown() { drop_sandbox; }
     expect 0
 }
 
-@test "audit: seeded problems are found, mapped to CIS, and --fail-on returns 10" {
+@test "F-29: audit finds seeded problems, maps them to CIS, --fail-on returns 10" {
     printf 'toor:x:0:0::/root:/bin/bash\n' >> "$SB/etc/passwd"
     printf 'toor::20000:0:99999:7:::\n' >> "$SB/etc/shadow"
     chmod 666 "$SB/etc/group"
@@ -94,7 +94,7 @@ teardown() { drop_sandbox; }
     ! grep -q '^daemon,' <<< "$output"
 }
 
-@test "policy: set updates pwquality.conf and login.defs; PASS_MIN_LEN is explained" {
+@test "F-17: policy set writes pwquality.conf and login.defs; PASS_MIN_LEN is explained" {
     printf 'PASS_MIN_LEN 5\n' >> "$SB/etc/login.defs"
     run umc policy show
     contains "PAM ignores it"

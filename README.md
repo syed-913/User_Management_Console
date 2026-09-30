@@ -243,7 +243,7 @@ chroot, a test fixture) instead of `/`.
 
 ## Compatibility
 
-| Distribution | Container tests (124) | VM, libvirt | Notes |
+| Distribution | Container tests (126) | VM, libvirt | Notes |
 |---|---|---|---|
 | RHEL 9 (UBI 9) | ✅ | not yet booted | box `generic/rhel9` |
 | RHEL 8 (UBI 8) | ✅ | - | bash 4.4: the oldest supported |
@@ -262,7 +262,7 @@ one, runs a smoke test and prints which boxes work for you.
 ## Testing and evidence
 
 ```bash
-tests/run-in-docker.sh                 # 124 tests in a throw-away Debian 12 container
+tests/run-in-docker.sh                 # 126 tests in a throw-away Debian 12 container
 tests/run-in-docker.sh --all           # the 9-distribution matrix (what CI runs)
 vagrant up rocky9 && vagrant provision rocky9 --provision-with test   # + SELinux/sshd end-to-end
 poc/run.sh                             # regenerate every evidence report
@@ -274,7 +274,9 @@ poc/run.sh                             # regenerate every evidence report
   crash recovery (a real `SIGKILL` mid-commit) and log tampering.
 - **Live:** the container's own `/etc`, real `useradd`/`chpasswd`/NSS.
 - **End-to-end (VM):** SELinux labels, SSH logins before and after a lock, journald, systemd timer.
-- Every v1 finding has a named regression test (`F-01` … `F-33`).
+- Every v1 finding that still applies has a regression test named after it
+  (`F-01` … `F-33`; F-20's feature was removed), so a reviewer can go from the
+  [CHANGELOG](CHANGELOG.md) straight to the test.
 - `tests/run.sh` refuses to run outside a container or test VM, because the
   live tests rewrite `/etc`.
 
