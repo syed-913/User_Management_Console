@@ -510,9 +510,11 @@ audit_event() {
 #     Linux has two independent locking conventions for the account files and
 #     the kernel does not make them exclude each other, so UMC takes both:
 #       1. /etc/.pwd.lock - lckpwdf(3), a POSIX fcntl() lock used by glibc,
-#          pam_unix (password changes), vipw and systemd-sysusers.
-#          Taken with 'flock --fcntl' (an OFD lock, which conflicts with
-#          lckpwdf) where util-linux supports it.
+#          pam_unix (password changes, incl. chpasswd on Debian), vipw and
+#          systemd-sysusers. Taken with 'flock --fcntl' (an OFD lock, which
+#          conflicts with lckpwdf) on util-linux >= 2.39; older systems get a
+#          tiny python3 or perl helper that holds the same fcntl lock for as
+#          long as UMC runs (and loses it automatically if UMC is killed).
 #       2. /etc/passwd.lock, shadow.lock, group.lock, gshadow.lock - the
 #          shadow-utils hard-link protocol used by useradd, usermod, passwd,
 #          chage, gpasswd (lib/commonio.c): write your PID to FILE.PID, then
@@ -524,7 +526,7 @@ audit_event() {
 #     lock is how v1 lost concurrent password changes (F-13).
 # ==============================================================================
 
-LK_UMC_FD="" LK_PWD_FD="" LK_HL=()
+LK_UMC_FD="" LK_PWD_FD="" LK_HL=() LK_PWD_PID="" LK_PWD_IN=""
 
 lk_umc() {
     mkdir -p -- "${UMC_LOCK%/*}" || die "$E_FAIL" "cannot create ${UMC_LOCK%/*}"
@@ -540,13 +542,58 @@ lk_umc() {
     printf '%s\n' "$BASHPID" > "$UMC_LOCK"
 }
 
+# Helpers that hold an fcntl() write lock on $1 until stdin closes. Used only
+# when 'flock --fcntl' is missing. They print "locked" or "busy".
+readonly LCKPWDF_PY='import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+end = time.time() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+    except OSError:
+        if time.time() >= end: print("busy", flush=True); sys.exit(1)
+        time.sleep(0.2)
+print("locked", flush=True)
+sys.stdin.read()'
+readonly LCKPWDF_PL='use Fcntl; my ($f, $t) = @ARGV;
+sysopen(my $fh, $f, O_RDWR | O_CREAT, 0600) or die "open $f: $!";
+my $end = time + $t; my $lk = pack("s s x4 q q l x4", F_WRLCK, 0, 0, 0, 0);
+until (fcntl($fh, F_SETLK, $lk)) { if (time >= $end) { print "busy\n"; exit 1 } select(undef, undef, undef, 0.2) }
+$| = 1; print "locked\n"; while (<STDIN>) {}'
+
+# lckpwdf_method -> REPLY: flock | python3 | perl | none
+lckpwdf_method() {
+    if cap_has fcntl_lock; then REPLY=flock
+    elif command -v python3 >/dev/null 2>&1; then REPLY=python3
+    elif command -v perl >/dev/null 2>&1 && perl -MConfig -e 'exit(($Config{longsize} == 8 && $Config{byteorder} =~ /^1234/) ? 0 : 1)' 2>/dev/null; then REPLY=perl
+    else REPLY=none
+    fi
+}
+
 lk_pwd() {
     $LIVE || return 0                  # shadow-utils skips lckpwdf with --prefix, too
-    cap_has fcntl_lock || return 0     # documented fallback: hard-link locks only
-    exec {LK_PWD_FD}>>"$ETC/.pwd.lock" || die "$E_FAIL" "cannot open $ETC/.pwd.lock"
-    flock --fcntl -w "${CFG[lock_timeout]}" "$LK_PWD_FD" ||
-        die "$E_LOCKED" "$ETC/.pwd.lock is held (a password change or vipw is in progress)" \
-            "nothing was changed" "retry in a moment"
+    local t=${CFG[lock_timeout]} line=""
+    lckpwdf_method
+    case $REPLY in
+        flock)
+            exec {LK_PWD_FD}>>"$ETC/.pwd.lock" || die "$E_FAIL" "cannot open $ETC/.pwd.lock"
+            flock --fcntl -w "$t" "$LK_PWD_FD" && return 0 ;;
+        python3|perl)
+            # Signals are ignored in the helper so a Ctrl-C cannot drop the lock mid-commit.
+            if [[ $REPLY == python3 ]]; then
+                coproc LKPWD { trap '' INT TERM HUP; exec python3 -c "$LCKPWDF_PY" "$ETC/.pwd.lock" "$t"; }
+            else
+                coproc LKPWD { trap '' INT TERM HUP; exec perl -e "$LCKPWDF_PL" "$ETC/.pwd.lock" "$t"; }
+            fi
+            # shellcheck disable=SC2153  # LKPWD_PID is set by 'coproc LKPWD'
+            LK_PWD_PID=$LKPWD_PID LK_PWD_IN=${LKPWD[1]}
+            read -r -t $((t + 5)) line <&"${LKPWD[0]}" || line=""
+            [[ $line == locked ]] && return 0 ;;
+        none)
+            return 0 ;;                # documented: hard-link locks only (umc doctor shows this)
+    esac
+    die "$E_LOCKED" "$ETC/.pwd.lock is held (a password change through PAM, or vipw, is in progress)" \
+        "nothing was changed" "retry in a moment"
 }
 
 # lk_hl FILE - shadow-utils compatible lock on FILE (creates FILE.lock).
@@ -601,6 +648,12 @@ lk_release_all() {
     done
     LK_HL=()
     if [[ -n $LK_PWD_FD ]]; then exec {LK_PWD_FD}>&-; LK_PWD_FD=""; fi
+    if [[ -n $LK_PWD_PID ]]; then
+        [[ -n $LK_PWD_IN ]] && { exec {LK_PWD_IN}>&- 2>/dev/null || true; }
+        kill "$LK_PWD_PID" 2>/dev/null
+        wait "$LK_PWD_PID" 2>/dev/null
+        LK_PWD_PID="" LK_PWD_IN=""
+    fi
     if [[ -n $LK_UMC_FD ]]; then exec {LK_UMC_FD}>&-; LK_UMC_FD=""; fi
     return 0
 }
@@ -818,8 +871,17 @@ _install_file() {
     return 0
 }
 
+# Test hook: UMC_FAULT=kill-after-install:N makes UMC SIGKILL itself right
+# after the N-th file of a commit is in place, to prove crash recovery.
+# Honoured ONLY in --root sandbox mode; it does nothing on a live system.
+_fault_point() {
+    $LIVE && return 0
+    [[ ${UMC_FAULT:-} == "kill-after-install:$1" ]] && kill -KILL "$BASHPID"
+    return 0
+}
+
 txn_commit() {
-    local k f i changed=() xchanged=() src
+    local k f i changed=() xchanged=() src nfile=0
     [[ $TXN_PHASE == staged ]] || bug "txn_commit called in phase $TXN_PHASE"
     $MANAGED_DIRTY && _managed_flush
 
@@ -868,6 +930,7 @@ txn_commit() {
         [[ " ${changed[*]} " == *" $k "* ]] || continue
         db_path "$k"
         _install_file "$WORK/new/$k" "$REPLY" db || _txn_commit_failed "$REPLY"
+        nfile=$((nfile + 1)); _fault_point "$nfile"
     done
     for i in "${xchanged[@]}"; do
         f=${TXN_XFILES[i]}
@@ -912,13 +975,32 @@ _txn_commit_failed() {
 }
 
 txn_verify() {
-    local d=$TXN_DIR/$TXN_ID n rel why=""
-    # (a) What is on disk must be byte-identical to what was written: catches
-    #     a writer that ignored the locks, or a filesystem that lied.
+    local d=$TXN_DIR/$TXN_ID n rel why="" drift=() line lost=""
+    # (a) What is on disk should be byte-identical to what was written. If it
+    #     is not, a program that ignores the account-file locks wrote at the
+    #     same time. Restoring our pre-images would then destroy ITS change,
+    #     so in that case UMC never rolls back: it checks that its own entries
+    #     survived and reports.
     while IFS=$'\t' read -r n rel _; do
-        [[ -e $d/post/$n.absent ]] && { [[ ! -e $R$rel ]] || why="$rel still exists"; continue; }
-        cmp -s -- "$d/post/$n" "$R$rel" || why="$rel changed underneath UMC during the commit"
+        if [[ -e $d/post/$n.absent ]]; then [[ -e $R$rel ]] && drift+=("$rel"); continue; fi
+        cmp -s -- "$d/post/$n" "$R$rel" || drift+=("$rel")
     done < "$d/files"
+    if ((${#drift[@]})); then
+        local t db nm fpath
+        for t in "${!TXN_TARGET[@]}"; do
+            db=${t%%:*} nm=${t#*:}
+            db_path "$db"; fpath=$REPLY
+            [[ " ${drift[*]} " == *" ${fpath#"$R"} "* ]] || continue
+            # the entry as UMC wrote it must still be in the file
+            if db_line "$db" "$nm"; then grep -qxF -- "$REPLY" "$fpath" || lost+=" $nm"; fi
+        done
+        if [[ -n $lost ]]; then
+            die "$E_INTEGRITY" "another program rewrote ${drift[*]} at the same time without honouring the account-file locks, and UMC's change to:$lost was overwritten" \
+                "COMMITTED BUT OVERWRITTEN by the other program (journal: $d); nothing was rolled back, so the other program's change is kept" \
+                "re-run the same command; 'umc doctor' shows which lock protocols this host supports"
+        fi
+        warn "another program changed ${drift[*]} during the commit; UMC's own entries are intact"
+    fi
     # (b) Live systems: flush name-service caches, then resolve through NSS
     #     exactly like login would.
     if [[ -z $why ]] && $LIVE; then
@@ -935,6 +1017,8 @@ txn_verify() {
         done
     fi
     [[ -z $why ]] && return 0
+    ((${#drift[@]})) && die "$E_INTEGRITY" "post-commit verification failed: $why" \
+        "COMMITTED; not rolled back because another program changed the same files" "inspect with: umc show $TXN_ID"
 
     critical_begin
     if _txn_install_images "$d" pre; then
@@ -1299,7 +1383,8 @@ val_date() {
         ''|never|none) REPLY=""; return 0 ;;
     esac
     if [[ $d =~ ^\+([0-9]{1,5})$ ]]; then
-        today_days; REPLY=$((REPLY + 10#${BASH_REMATCH[1]})); return 0
+        local add=$((10#${BASH_REMATCH[1]}))     # save it: today_days runs its own =~
+        today_days; REPLY=$((REPLY + add)); return 0
     fi
     [[ $d =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || _vfail "'$d' is not a date (use YYYY-MM-DD, +DAYS or never)" || return 1
     s=$(date -u -d "$d" +%s 2>/dev/null) && [[ $(date -u -d "@$s" +%F) == "$d" ]] ||
@@ -1392,13 +1477,12 @@ id_alloc() {
     else
         defs_get "${pfx}_MIN" 1000; min=$REPLY
         defs_get "${pfx}_MAX" 60000; max=$REPLY
+        # Continue after the highest UID (GID for groups) in the range; for a
+        # user-private group, numbers that are taken as a GID are skipped below.
         cand=$min
         local -n _used=USED_UID
         [[ $what == gid ]] && local -n _used=USED_GID
         for id in "${!_used[@]}"; do (( id >= min && id <= max && id >= cand )) && cand=$((id + 1)); done
-        if [[ $what == pair ]]; then
-            for id in "${!USED_GID[@]}"; do (( id >= min && id <= max && id >= cand )) && cand=$((id + 1)); done
-        fi
     fi
     while ((${#got[@]} < count)); do
         batch=()
@@ -2277,7 +2361,7 @@ op_user_modify() {   # NAME ; UO: gecos shell home move add_groups remove_groups
         db_del PW "$n"; db_del SP "$n"
         # The user-private group follows the user when it has the same name and GID.
         if db_fields GR "$n" && [[ ${F[2]} == "$U_GID" ]] && ! db_exists GR "$newn"; then
-            txn_target_group "$n" "$newn"
+            txn_target_group "$n"; txn_target_group "$newn"
             F[0]=$newn; join_fields "${F[@]}"; db_del GR "$n"; db_put GR "$newn" "$REPLY"
             if db_fields GS "$n"; then F[0]=$newn; join_fields "${F[@]}"; db_del GS "$n"; db_put GS "$newn" "$REPLY"; fi
         fi
@@ -4505,7 +4589,12 @@ cmd_doctor() {
     _dr "bash" "$BASH_VERSION"
     _dr "mode" "$($LIVE && echo "live system (/)" || echo "offline tree --root $R")"
     _dr "running as root" "$( ((EUID == 0)) && echo yes || echo "NO - most commands need root")"
-    _yn fcntl_lock "hard-link locks only; lckpwdf users are not excluded"; _dr "flock --fcntl (lckpwdf interop)" "$REPLY"
+    lckpwdf_method
+    case $REPLY in
+        flock)   _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_GREEN}yes${C_RESET} (flock --fcntl)" ;;
+        python3|perl) _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_GREEN}yes${C_RESET} (fcntl via $REPLY; this util-linux has no flock --fcntl)" ;;
+        *)       _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_YELLOW}no${C_RESET}  (PAM password changes are not excluded; install python3 or util-linux >= 2.39)" ;;
+    esac
     _yn openssl6 "cannot hash passwords";       _dr "openssl SHA-512 crypt" "$REPLY"
     pw_hash_method >/dev/null 2>&1;             _dr "password hash method" "${CFG[hash_method]} -> ${REPLY:-sha512}"
     _yn yescrypt;                               _dr "yescrypt (mkpasswd)" "$REPLY"
@@ -5792,6 +5881,7 @@ main() {
     traps_install
     debug_install
     cfg_load
+    cfg_resolve              # effective defaults, once, for every command
     audit_actor_init
     ((EUID == 0)) && AUDIT_READY=true
 
