@@ -1,0 +1,15 @@
+# Debian-style defaults (trimmed)
+MAIL_DIR        /var/mail
+PASS_MAX_DAYS   99999
+PASS_MIN_DAYS   0
+PASS_WARN_AGE   7
+UID_MIN         1000
+UID_MAX         60000
+SYS_UID_MIN     100
+SYS_UID_MAX     999
+GID_MIN         1000
+GID_MAX         60000
+SYS_GID_MIN     100
+SYS_GID_MAX     999
+UMASK           022
+ENCRYPT_METHOD  SHA512

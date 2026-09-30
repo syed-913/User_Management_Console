@@ -1,0 +1,4 @@
+Defaults env_reset
+root ALL=(ALL) ALL
+%wheel ALL=(ALL) ALL
+#includedir /etc/sudoers.d
