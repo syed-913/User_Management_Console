@@ -1,0 +1,14 @@
+root:x:0:
+daemon:x:1:
+bin:x:2:
+sys:x:3:
+adm:x:4:admin
+wheel:x:10:admin
+apache:x:48:
+users:x:100:
+nogroup:x:65534:
+admin:x:1000:
+docker:x:1001:admin
+bobby:x:1002:
+bobcat:x:1003:
+devs:x:2000:bobby,bobcat
