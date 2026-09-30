@@ -1,0 +1,5 @@
+Employee ID,First Name,Last Name,E-Mail,Department,Job Title,Start Date,Contract End,Status
+3001,Ayesha,Siddiqui,ayesha.siddiqui@example.com,Engineering,Backend Engineer,2026-10-01,,Active
+3002,Tom,Becker,tom.becker@example.com,IT Operations,SRE,2026-10-01,,Active
+3003,Lina,Haddad,lina.haddad@example.com,Finance,Contractor - Audit,2026-10-05,2027-03-31,Active
+3004,Kenji,Watanabe,kenji.watanabe@example.com,Engineering,Engineering Manager,2026-10-01,,On leave
