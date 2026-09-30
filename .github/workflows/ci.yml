@@ -15,9 +15,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: syntax
         run: bash -n umc.sh
-      - name: shellcheck (umc.sh: zero findings at any severity)
+      - name: "shellcheck (umc.sh: zero findings at any severity)"
         run: shellcheck umc.sh
-      - name: shellcheck (helper scripts: warnings and errors)
+      - name: "shellcheck (helper scripts: warnings and errors)"
         run: shellcheck -S warning -x tests/run.sh tests/run-in-docker.sh tests/docker/install-deps.sh tests/vagrant/*.sh poc/*.sh
 
   test:
