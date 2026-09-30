@@ -91,6 +91,6 @@ teardown() { rm -f /tmp/shadow /tmp/passwd; }
 @test "live: doctor reports capabilities without needing any optional tool" {
     run umc_live doctor
     expect 0
-    contains "flock --fcntl"
+    contains "lckpwdf interop"
     contains "script integrity"
 }
