@@ -283,6 +283,7 @@ cfg_load() {
         [[ -n ${CFG[$key]+x} ]] || die "$E_INVALID" "$f:$n: unknown setting '$key'" \
             "nothing was changed" "remove it or fix the spelling (see examples/umc.conf)"
         cfg_check "$key" "$val" || die "$E_INVALID" "$f:$n: $key: $VAL_ERR"
+        [[ $key == hash_method ]] && val=${val^^}
         CFG[$key]=$val
     done < "$f"
 }
@@ -305,7 +306,7 @@ cfg_check() {
             [[ $v =~ ^(first\.last|flast|firstl|first_last|last\.first|first)$ ]] ||
                 VAL_ERR="must be one of: first.last flast firstl first_last last.first first" ;;
         hash_method)
-            [[ $v =~ ^(|SHA512|YESCRYPT)$ ]] || VAL_ERR="must be SHA512 or YESCRYPT" ;;
+            [[ ${v^^} =~ ^(|SHA512|YESCRYPT)$ ]] || VAL_ERR="must be SHA512 or YESCRYPT" ;;
     esac
     [[ -z $VAL_ERR ]]
 }
@@ -1700,6 +1701,37 @@ pw_generate_many() {   # COUNT -> GEN[]
     done
 }
 
+# Which algorithm does PAM's pam_unix (i.e. the 'passwd' command) use?
+# -> REPLY: yescrypt | sha512 | sha256 | blowfish | md5 | default | '' (no PAM config found)
+pam_hash_method() {
+    local f line
+    for f in "$ETC/pam.d/common-password" "$ETC/pam.d/system-auth" "$ETC/pam.d/password-auth"; do
+        [[ -r $f ]] || continue
+        while IFS= read -r line; do
+            [[ $line =~ ^[[:space:]]*password[[:space:]].*pam_unix\.so(.*)$ ]] || continue
+            case " ${BASH_REMATCH[1]} " in
+                *" yescrypt "*) REPLY=yescrypt ;; *" sha512 "*) REPLY=sha512 ;; *" sha256 "*) REPLY=sha256 ;;
+                *" blowfish "*) REPLY=blowfish ;;  *" md5 "*) REPLY=md5 ;;       *) REPLY=default ;;
+            esac
+            return 0
+        done < "$f"
+    done
+    REPLY=""
+}
+# Do login.defs (used by UMC, chpasswd -c, newusers without PAM) and PAM
+# (used by passwd) agree? Debian 12 ships SHA512 vs yescrypt, for example.
+# -> returns 1 and sets HASH_MISMATCH="login.defs X, PAM Y" when they differ.
+HASH_MISMATCH=""
+hash_config_check() {
+    local defs pam
+    defs_get ENCRYPT_METHOD SHA512; defs=${REPLY,,}
+    pam_hash_method; pam=$REPLY
+    HASH_MISMATCH=""
+    [[ -z $pam || $pam == default || $pam == "$defs" ]] && return 0
+    HASH_MISMATCH="login.defs ENCRYPT_METHOD is ${defs^^} but PAM (passwd) uses $pam"
+    return 1
+}
+
 HASH_WARNED=false
 pw_hash_method() {
     case ${CFG[hash_method]} in
@@ -1714,38 +1746,46 @@ pw_hash_method() {
     REPLY=sha512
 }
 
-# pw_hash_many: PW_IN[] -> PW_OUT[] (same order). SHA-512 hashing is split
-# across CPU cores; one openssl process hashes a whole batch (measured ~2x
-# faster than one process per password, before parallelism).
+# pw_hash_many: PW_IN[] -> PW_OUT[] (same order). The batch is split into
+# contiguous chunks, one per CPU core (max 8), and the chunks are joined back
+# in order. SHA-512: one openssl process hashes a whole chunk. yescrypt:
+# mkpasswd hashes one password per process, so each chunk is a loop.
 pw_hash_many() {
-    local n=${#PW_IN[@]} method j jobs start chunk tmpd h
+    local n=${#PW_IN[@]} method j jobs start chunk tmpd h min_per_job
     PW_OUT=()
     ((n)) || return 0
     pw_hash_method; method=$REPLY
     if [[ $method == yescrypt ]]; then
-        local p
-        for p in "${PW_IN[@]}"; do
-            h=$(printf '%s\n' "$p" | mkpasswd -m yescrypt --stdin 2>/dev/null) || die "$E_FAIL" "password hashing (mkpasswd) failed"
-            PW_OUT+=("$h")
-        done
+        need mkpasswd
+        min_per_job=4          # a yescrypt hash costs ~10 ms: worth splitting early
     else
         need openssl
         cap_has openssl6 || die "$E_FAIL" "this OpenSSL cannot create SHA-512 crypt hashes (OpenSSL 1.1.1+ required)"
-        jobs=$(nproc 2>/dev/null || echo 1)
-        ((jobs > 8)) && jobs=8
-        ((n < 64)) && jobs=1
-        chunk=$(( (n + jobs - 1) / jobs ))
-        if [[ -n $WORK && -d $WORK ]]; then tmpd=$WORK; else tmpd=$(mktemp -d) || die "$E_FAIL" "mktemp failed"; CLEANUP+=("$tmpd"); fi
-        local pids=()
-        for ((j = 0; j < jobs; j++)); do
-            start=$((j * chunk))
-            ((start < n)) || break
-            printf '%s\n' "${PW_IN[@]:start:chunk}" | openssl passwd -6 -stdin > "$tmpd/hash.$j" 2>/dev/null &
-            pids+=($!)
-        done
-        for j in "${!pids[@]}"; do wait "${pids[j]}" || die "$E_FAIL" "password hashing (openssl) failed"; done
-        for j in "${!pids[@]}"; do mapfile -t -O "${#PW_OUT[@]}" PW_OUT < "$tmpd/hash.$j"; rm -f -- "$tmpd/hash.$j"; done
+        min_per_job=64         # ~3 ms each: not worth a process below this
     fi
+    jobs=$(nproc 2>/dev/null || echo 1)
+    ((jobs > 8)) && jobs=8
+    (( n / min_per_job < jobs )) && jobs=$(( n / min_per_job ))
+    ((jobs >= 1)) || jobs=1
+    chunk=$(( (n + jobs - 1) / jobs ))
+    if [[ -n $WORK && -d $WORK ]]; then tmpd=$WORK; else tmpd=$(mktemp -d) || die "$E_FAIL" "mktemp failed"; CLEANUP+=("$tmpd"); fi
+    local pids=() p
+    for ((j = 0; j < jobs; j++)); do
+        start=$((j * chunk))
+        ((start < n)) || break
+        if [[ $method == yescrypt ]]; then
+            (
+                for p in "${PW_IN[@]:start:chunk}"; do
+                    printf '%s\n' "$p" | mkpasswd -m yescrypt --stdin || exit 1
+                done
+            ) > "$tmpd/hash.$j" 2>/dev/null &
+        else
+            printf '%s\n' "${PW_IN[@]:start:chunk}" | openssl passwd -6 -stdin > "$tmpd/hash.$j" 2>/dev/null &
+        fi
+        pids+=($!)
+    done
+    for j in "${!pids[@]}"; do wait "${pids[j]}" || die "$E_FAIL" "password hashing ($method) failed"; done
+    for j in "${!pids[@]}"; do mapfile -t -O "${#PW_OUT[@]}" PW_OUT < "$tmpd/hash.$j"; rm -f -- "$tmpd/hash.$j"; done
     ((${#PW_OUT[@]} == n)) || die "$E_FAIL" "password hashing returned ${#PW_OUT[@]} hashes for $n passwords"
     for h in "${PW_OUT[@]}"; do
         # v1 wrote openssl's "<NULL>" into /etc/shadow for an empty password (F-15).
@@ -3863,7 +3903,8 @@ AUD-19|low|No stale account-file locks|(operational)|umc locks --clear-stale
 AUD-20|high|No interrupted UMC transactions|(operational)|umc recover
 AUD-21|info|Accounts expiring within 14 days|(operational)|extend with umc user expire NAME DATE if still needed
 AUD-22|info|Onboarding: temporary passwords not yet changed|(operational)|run umc sweep (or install its timer)
-AUD-23|info|Offboarded accounts past their retention period|(operational)|delete explicitly when ready: umc user delete NAME'
+AUD-23|info|Offboarded accounts past their retention period|(operational)|delete explicitly when ready: umc user delete NAME
+AUD-24|low|login.defs and PAM use the same password hashing algorithm|Ensure strong password hashing algorithm is configured|align ENCRYPT_METHOD in /etc/login.defs with the pam_unix option (or set hash_method in umc.conf)'
 
 declare -A CHK_SEV=() CHK_TITLE=() CHK_CIS=() CHK_FIX=() CHK_HITS=()
 CHK_ORDER=() FND=()
@@ -3986,6 +4027,8 @@ aud_run() {
             [[ $line == *NOPASSWD* ]] && _hit AUD-16 "${sf#"$R"}" "${line##+([[:space:]])}"
         done < "$sf" 2>/dev/null
     done
+    # --- hashing configuration
+    hash_config_check || _hit AUD-24 "/etc/login.defs vs PAM" "$HASH_MISMATCH"
     # --- locks, journal, onboarding, offboarding
     for f in "$F_PASSWD" "$F_SHADOW" "$F_GROUP" "$F_GSHADOW"; do
         [[ -e $f.lock ]] || continue
@@ -4180,6 +4223,10 @@ cmd_policy() {
             say "    pwquality (enforced by PAM: $pam)  minlen=${POL[minlen]} minclass=${POL[minclass]} dcredit=${POL[dcredit]} ucredit=${POL[ucredit]} lcredit=${POL[lcredit]} ocredit=${POL[ocredit]} maxrepeat=${POL[maxrepeat]} usercheck=${POL[usercheck]}"
             defs_get PASS_MAX_DAYS 99999; local mx=$REPLY; defs_get PASS_MIN_DAYS 0; local mn=$REPLY; defs_get PASS_WARN_AGE 7; local wn=$REPLY
             say "    login.defs aging (new accounts)    PASS_MAX_DAYS=$mx PASS_MIN_DAYS=$mn PASS_WARN_AGE=$wn ENCRYPT_METHOD=${CFG[hash_method]}"
+            if ! hash_config_check; then
+                local want=${HASH_MISMATCH##* }
+                say "    ${C_YELLOW}note:${C_RESET} $HASH_MISMATCH. UMC hashes with ${CFG[hash_method]}; set 'hash_method = ${want^^}' in umc.conf to match passwd"
+            fi
             defs_get PASS_MIN_LEN ""; [[ -n $REPLY ]] && say "    ${C_DIM}note: PASS_MIN_LEN=$REPLY is set in login.defs but PAM ignores it; length is minlen in pwquality.conf${C_RESET}"
             say "    UMC temporary passwords            ${CFG[onboarding_deadline_hours]} h to change · offboard retention ${CFG[offboard_retention_days]} days"
             jraw minlen "${POL[minlen]}"; jraw minclass "${POL[minclass]}"; jraw max_days "$mx"; jraw min_days "$mn"; jraw warn_days "$wn"; jemit ;;
@@ -4770,7 +4817,9 @@ cmd_doctor() {
         *)       _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_YELLOW}no${C_RESET}  (PAM password changes are not excluded; install python3 or util-linux >= 2.41)" ;;
     esac
     _yn openssl6 "cannot hash passwords";       _dr "openssl SHA-512 crypt" "$REPLY"
-    pw_hash_method >/dev/null 2>&1;             _dr "password hash method" "${CFG[hash_method]} -> ${REPLY:-sha512}"
+    pw_hash_method >/dev/null 2>&1;             _dr "password hash method (UMC)" "${CFG[hash_method]} -> ${REPLY:-sha512}"
+    if hash_config_check; then _dr "hash method, PAM vs login.defs" "consistent"
+    else _dr "hash method, PAM vs login.defs" "${C_YELLOW}differ${C_RESET}: $HASH_MISMATCH; UMC follows login.defs (set hash_method in umc.conf to match PAM)"; fi
     _yn yescrypt;                               _dr "yescrypt (mkpasswd)" "$REPLY"
     _yn pwscore "native policy checks are used"; _dr "pwscore (pwquality policy)" "$REPLY"
     _yn selinux;                                _dr "SELinux labels maintained" "$REPLY"

@@ -81,7 +81,7 @@ teardown() { drop_sandbox; }
     run umc audit --json
     expect 0
     [[ $output == '{"ok":true,"summary":'* ]]
-    [ "$(grep -o '"id":"AUD-' <<< "$output" | wc -l)" -ge 23 ]
+    [ "$(grep -o '"id":"AUD-' <<< "$output" | wc -l)" -ge 24 ]
 }
 
 @test "export: an access-review CSV with one row per human account" {
@@ -104,4 +104,19 @@ teardown() { drop_sandbox; }
     grep -qE '^PASS_MAX_DAYS[[:space:]]+90' "$SB/etc/login.defs"
     [ "$(field shadow bobby 5)" = 90 ]
     [ "$(field shadow root 5)" = 99999 ]                       # system accounts untouched
+}
+
+@test "AUD-24: a login.defs / PAM hashing mismatch is reported by audit, doctor and policy" {
+    mkdir -p "$SB/etc/pam.d"
+    printf 'password [success=1 default=ignore] pam_unix.so obscure yescrypt\n' > "$SB/etc/pam.d/common-password"
+    run umc audit
+    contains "AUD-24"
+    contains "ENCRYPT_METHOD is SHA512 but PAM (passwd) uses yescrypt"
+    run umc doctor
+    contains "differ"
+    run umc policy show
+    contains "hash_method = YESCRYPT"
+    printf 'password sufficient pam_unix.so sha512 shadow\n' > "$SB/etc/pam.d/common-password"
+    run umc audit
+    [[ $output == *"PASS  AUD-24"* ]]
 }

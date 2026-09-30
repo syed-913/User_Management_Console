@@ -131,3 +131,38 @@ teardown() { drop_sandbox; }
     [ "$(wc -l <<< "$output")" -eq 3 ]
     while IFS= read -r h; do [[ $h == '$6$'* ]] || return 1; done <<< "$output"
 }
+
+# crypt(3) check of PASSWORD against HASH, without trusting UMC's own code.
+verify_hash() {
+    if command -v perl >/dev/null 2>&1; then
+        perl -e 'exit(crypt($ARGV[0], $ARGV[1]) eq $ARGV[1] ? 0 : 1)' "$1" "$2"
+    else
+        local salt=${2#\$6\$}; salt=${salt%%\$*}
+        [[ $2 == '$6$'* && $(openssl passwd -6 -salt "$salt" "$1") == "$2" ]]
+    fi
+}
+
+@test "parallel SHA-512 hashing keeps every password paired with its own hash (crypt(3) check)" {
+    run ufn 'PW_IN=(); for i in $(seq 1 300); do PW_IN+=("Pw-$i-long-enough"); done; pw_hash_many; printf "%s\n" "${PW_OUT[@]}"'
+    expect 0
+    [ "$(wc -l <<< "$output")" -eq 300 ]
+    local i=0 h
+    while IFS= read -r h; do
+        i=$((i + 1))
+        verify_hash "Pw-$i-long-enough" "$h" || { echo "hash $i does not match password $i"; return 1; }
+    done <<< "$output"
+}
+
+@test "parallel yescrypt hashing keeps every password paired with its own hash (crypt(3) check)" {
+    command -v mkpasswd >/dev/null && mkpasswd -m help 2>&1 | grep -qw yescrypt || skip "no yescrypt-capable mkpasswd"
+    command -v perl >/dev/null || skip "perl is needed to verify yescrypt hashes"
+    run ufn 'CFG[hash_method]=YESCRYPT; PW_IN=(); for i in $(seq 1 40); do PW_IN+=("Yes-$i-crypt"); done; pw_hash_many; printf "%s\n" "${PW_OUT[@]}"'
+    expect 0
+    [ "$(wc -l <<< "$output")" -eq 40 ]
+    local i=0 h
+    while IFS= read -r h; do
+        i=$((i + 1))
+        [[ $h == '$y$'* ]] || { echo "not a yescrypt hash: $h"; return 1; }
+        verify_hash "Yes-$i-crypt" "$h" || { echo "hash $i does not match password $i"; return 1; }
+    done <<< "$output"
+}
