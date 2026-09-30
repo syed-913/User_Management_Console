@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | UMC reads HR exports without reformatting: semicolon or comma delimiters, UTF-8 BOM, UTF-16, Windows line endings, quoted fields, accented names, day-first dates, HR status words and nested JSON - and says exactly how it interpreted them. |
 | **Method** | "umc import inspect" and "umc apply" are run on three fixtures plus a UTF-16 (Excel "Unicode Text") conversion of one of them. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `41699b1` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-14` |
 | **Verdict** | ✅ PASS |
 
@@ -70,12 +70,12 @@ $ umc apply -f hr_export_semicolon.csv
 
   Plan: 4 to add, 0 to change, 0 to offboard.  (nothing has been changed)
   ✓ applied hr_export_semicolon.csv: 4 to add, 0 to change, 0 to offboard
-  • 4 temporary password(s) in /root/umc/credentials/20260930T124620Z-182-1.csv (root only); each must be changed within 24 h
+  • 4 temporary password(s) in /root/umc/credentials/20260930T151342Z-182-1.csv (root only); each must be changed within 24 h
   • home directory /home/alice.khan is ready
   • home directory /home/jose.nunez is ready
   • home directory /home/chen.wei is ready
   • home directory /home/mary.obrien is ready
-  • txn 20260930T124620Z-182-1  ·  undo with: umc rollback 20260930T124620Z-182-1
+  • txn 20260930T151342Z-182-1  ·  undo with: umc rollback 20260930T151342Z-182-1
 
 $ umc apply -f hr_api_nested.json --create-groups
 
@@ -86,10 +86,10 @@ $ umc apply -f hr_api_nested.json --create-groups
 
   Plan: 2 to add, 0 to change, 0 to offboard.  (nothing has been changed)
   ✓ applied hr_api_nested.json: 2 to add, 0 to change, 0 to offboard
-  • 2 temporary password(s) in /root/umc/credentials/20260930T124620Z-462-1.csv (root only); each must be changed within 24 h
+  • 2 temporary password(s) in /root/umc/credentials/20260930T151343Z-462-1.csv (root only); each must be changed within 24 h
   • home directory /home/priya.sharma is ready
   • home directory /home/lars.o is ready
-  • txn 20260930T124620Z-462-1  ·  undo with: umc rollback 20260930T124620Z-462-1
+  • txn 20260930T151343Z-462-1  ·  undo with: umc rollback 20260930T151343Z-462-1
 
 $ umc user list
   USER                     UID  HOME                     PASSWORD     EXPIRES

@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | Every UMC operation converges: repeating a create, a lock, a group change or a whole bulk apply leaves the account files byte-identical and exits 0. |
 | **Method** | Each operation runs twice in a sandbox; SHA-256 of the four files is compared after the first and second run. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `41699b1` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-08` |
 | **Verdict** | ✅ PASS |
 
