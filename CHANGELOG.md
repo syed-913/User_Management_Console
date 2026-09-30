@@ -57,7 +57,7 @@ explained in [docs/DESIGN.md](docs/DESIGN.md).
 - `audit` (CIS-mapped), `export` (access review), `policy show|set`
 - `history`, `show`, `rollback`, `recover`, `locks`, `log verify`, `doctor`
 - Subordinate UID/GID ranges for rootless containers; `pam_faillock` reset on unlock
-- Test-suite (124 tests), 9-distro container matrix, VM end-to-end tests, evidence reports, CI
+- Test-suite (126 tests + 4 VM end-to-end tests), 9-distribution container matrix, evidence reports, CI
 
 ### Removed
 

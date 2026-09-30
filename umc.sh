@@ -947,8 +947,9 @@ txn_commit() {
     # 5. Install.
     local order=(GR GS SP PW)
     [[ $TXN_ORDER == unpublish ]] && order=(PW SP GS GR)   # deletions: make the user disappear first
+    _txn_state committing || die "$E_FAIL" "cannot update the journal entry $TXN_DIR/$TXN_ID" "nothing was changed" \
+        "check free space and permissions of $TXN_DIR"
     TXN_PHASE=committing
-    _txn_meta_set state committing
     critical_begin
     for k in "${order[@]}"; do
         [[ " ${changed[*]} " == *" $k "* ]] || continue
@@ -973,9 +974,16 @@ txn_commit() {
         [[ " ${dirs[*]} " == *" $d "* ]] || dirs+=("$d")
     done
     sync -- "${dirs[@]}" 2>/dev/null || sync
-    _txn_meta_set state committed
+    if ! _txn_state committed; then
+        # Cannot happen short of an I/O error (it is a rename). Never report
+        # success for a transaction the journal still calls unfinished.
+        critical_end
+        die "$E_INTEGRITY" "the change was written but could not be recorded as finished in the journal" \
+            "the next UMC run will roll it back from the journal (txn $TXN_ID)" "fix the disk problem, run 'umc recover', then repeat the command"
+    fi
     TXN_PHASE=committed TXN_CHANGED=true
     critical_end
+    rm -f -- "$TXN_DIR/$TXN_ID/meta.committing" "$TXN_DIR/$TXN_ID/meta.committed"
     local e b
     for e in "${TXN_UNDO[@]}"; do                    # hidden hard-link backups are no longer needed
         b=${e%%|*}; b=${b#DELETED:}
@@ -984,6 +992,7 @@ txn_commit() {
 
     # 6. Verify, and undo everything if the result is not what was intended.
     txn_verify
+    rm -f -- "$TXN_DIR/$TXN_ID/meta.rolled-back"        # settled: the spare state is no longer needed
     txn_prune
     return 0
 }
@@ -994,7 +1003,7 @@ _txn_commit_failed() {
     local what=$1
     # 1. rename the hard-linked originals back: needs no free space
     if _txn_fast_undo; then
-        _txn_meta_set state rolled-back 2>/dev/null
+        _txn_state rolled-back
         TXN_PHASE=rolledback
         critical_end
         die "$E_ROLLEDBACK" "could not install $what (disk full or I/O error?)" "" \
@@ -1002,7 +1011,7 @@ _txn_commit_failed() {
     fi
     # 2. fall back to the journal's pre-images
     if _txn_install_images "$TXN_DIR/$TXN_ID" pre; then
-        _txn_meta_set state rolled-back
+        _txn_state rolled-back
         TXN_PHASE=rolledback
         critical_end
         die "$E_ROLLEDBACK" "could not install $what (disk full or I/O error?)" "" \
@@ -1075,7 +1084,7 @@ txn_verify() {
 
     critical_begin
     if _txn_install_images "$d" pre; then
-        _txn_meta_set state rolled-back
+        _txn_meta_set state rolled-back 2>/dev/null || true
         TXN_PHASE=rolledback
         critical_end
         $LIVE && nss_flush
@@ -1121,7 +1130,15 @@ txn_journal_write() {
         printf 'root=%s\n' "$R"
         printf 'state=prepared\n'
     } > "$d/meta" || die "$E_FAIL" "cannot write journal $d"
-    sync -- "$d"/pre/* "$d"/post/* "$d/files" "$d/SHA256SUMS" "$d/meta" "$d" "$TXN_DIR" 2>/dev/null ||
+    # Every later state is written NOW, while there is room, and later only
+    # renamed into place: a rename needs no free space, so a disk that fills
+    # up during the commit can never leave a finished transaction marked
+    # "committing" (which recovery would then roll back).
+    local st
+    for st in committing committed rolled-back; do
+        sed "s/^state=prepared\$/state=$st/" "$d/meta" > "$d/meta.$st" || die "$E_FAIL" "cannot write journal $d"
+    done
+    sync -- "$d"/pre/* "$d"/post/* "$d/files" "$d/SHA256SUMS" "$d"/meta* "$d" "$TXN_DIR" 2>/dev/null ||
         die "$E_FAIL" "cannot fsync journal $d"
 }
 _journal_add() {   # DIR N PATH NEWCONTENT
@@ -1137,7 +1154,13 @@ _journal_add() {   # DIR N PATH NEWCONTENT
     printf '%s\t%s\t%s\n' "$n" "$rel" "$st" >> "$d/files"
 }
 
-_txn_meta_set() {   # KEY VALUE (atomic rewrite, fsync'd)
+# _txn_state STATE - switch the journal entry to a pre-written state (rename only).
+_txn_state() {
+    local d=$TXN_DIR/$TXN_ID
+    mv -f -T -- "$d/meta.$1" "$d/meta" 2>/dev/null && sync -- "$d" 2>/dev/null
+}
+
+_txn_meta_set() {   # KEY VALUE (atomic rewrite, fsync'd) - informational keys only
     local m=$TXN_DIR/$TXN_ID/meta tmp
     [[ -f $m ]] || return 0
     tmp=$(mktemp -- "$m.XXXXXX") || return 1

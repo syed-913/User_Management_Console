@@ -88,7 +88,7 @@ teardown() { rm -f /tmp/shadow /tmp/passwd; }
     contains "cron"
 }
 
-@test "live: doctor reports capabilities without needing any optional tool" {
+@test "F-23: doctor reports capabilities (feature detection, not distro names)" {
     run umc_live doctor
     expect 0
     contains "lckpwdf interop"

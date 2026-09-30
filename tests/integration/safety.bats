@@ -94,7 +94,7 @@ last_txn() { ls "$SB/var/lib/umc/txn" | tail -1; }
     expect 7
 }
 
-@test "audit records name the actor and never contain secrets" {
+@test "F-31: audit records name the actor and never contain secrets" {
     printf 'Correct-Horse-9\n' | umc user create carol --password-stdin >/dev/null
     umc user passwd carol --generate >/dev/null
     grep -q '"action":"user.create"' "$SB/var/log/umc/audit.jsonl"
@@ -124,7 +124,7 @@ last_txn() { ls "$SB/var/lib/umc/txn" | tail -1; }
     [ ! -f "$SB/etc/group.lock" ]
 }
 
-@test "--json output is machine-readable and errors are JSON too" {
+@test "F-32: --json output is machine-readable and errors are JSON too" {
     run umc --json user create carol
     expect 0
     [[ $output == '{"ok":true,'* ]]
