@@ -9,7 +9,7 @@ teardown() { drop_sandbox; }
     run umc user create carol --generate-password
     expect 0
     [ "$(field shadow carol 3)" = 0 ]
-    local dl; dl=$(awk -F= '$1=="deadline"{print $2}' "$SB/var/lib/umc/onboarding/carol")
+    local dl; dl=$(st_field onboarding carol deadline)
     (( dl > $(date +%s) + 86000 && dl <= $(date +%s) + 86400 ))
     [ "$(field shadow carol 8)" = $(( dl / 86400 + 1 )) ]       # backstop: the day after the deadline
     [ "$(mode_of "$SB/root/umc/credentials")" = 700 ]
@@ -18,7 +18,7 @@ teardown() { drop_sandbox; }
 
 @test "sweep: not changed by the deadline -> locked, and the slip entry is destroyed" {
     umc user create carol --generate-password >/dev/null
-    local dl; dl=$(awk -F= '$1=="deadline"{print $2}' "$SB/var/lib/umc/onboarding/carol")
+    local dl; dl=$(st_field onboarding carol deadline)
     run env UMC_NOW=$((dl - 60)) "$UMC" --no-color --root "$SB" sweep
     expect 0
     contains "no onboarding deadlines"
@@ -26,7 +26,7 @@ teardown() { drop_sandbox; }
     expect 0
     contains "not changed in time: carol"
     [[ $(field shadow carol 2) == '!'* ]] && [ "$(field shadow carol 8)" = 1 ]
-    [ ! -f "$SB/var/lib/umc/onboarding/carol" ]
+    ! st_row onboarding carol
     ! grep -qs '^carol,' "$SB"/root/umc/credentials/*.csv
 }
 
@@ -38,7 +38,7 @@ teardown() { drop_sandbox; }
     expect 0
     contains "activated"
     [ "$(field shadow carol 8)" = 21915 ]                            # 2030-01-01
-    [ ! -f "$SB/var/lib/umc/onboarding/carol" ]
+    ! st_row onboarding carol
 }
 
 @test "UMC_NOW is ignored on a live system (it only exists for sandbox tests)" {

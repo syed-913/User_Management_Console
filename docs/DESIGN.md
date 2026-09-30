@@ -311,3 +311,28 @@ These show that the protections are not theoretical. Each became a test:
    silently producing empty strings.
 5. **`BASH_REMATCH` clobbering**: `val_date +10` read its capture group after
    calling a helper that ran its own `=~`.
+6. **Disk full during the renames** ([E-06](../evidence/E-06-disk-full.md)):
+   restoring the old files needed free space too, so only `umc recover` could
+   finish the rollback. Originals are now hard-linked to their backup name
+   before each rename, so an undo is a `rename()` and needs no space. The same
+   run showed that a truncated staging write was only caught (correctly, but
+   with a misleading message) by the blast-radius check; every staging write
+   is now checked.
+7. **A deadlock found by the 1,000-user benchmark**
+   ([E-11](../evidence/E-11-performance.md)): parallel home creation ended with
+   a bare `wait`, which also waits for the `lckpwdf` helper coprocess, and that
+   helper by design lives as long as UMC. It only happened in live mode (sandboxes
+   do not take `lckpwdf`) with 16+ homes, so the tests missed it. It now waits
+   for its worker PIDs only, and a live test covers the path.
+8. **Profiling instead of guessing:** the first benchmark was *slower* than a
+   `useradd` loop. Profiling showed one small state file per user going through
+   the full commit protocol (~10 processes each). UMC's own state became one
+   table per kind, NSS checks and verification became one `getent` call per
+   batch, and homes are created in parallel.
+9. **A lesson from the evidence scripts themselves:** `set -o pipefail` plus
+   `grep -q` (or `head`) can report failure because `grep` exits early and the
+   writer gets `SIGPIPE`. In a checker, that can also *hide* a problem. Output
+   is now captured first and searched afterwards.
+10. **Locale-dependent regular expressions** (F-33): v1's password rule
+    `[\,\.\+\-$…]` only works where collation happens to make `\`–`$` a valid
+    range. `LC_ALL=C` everywhere, and no ranges between punctuation.

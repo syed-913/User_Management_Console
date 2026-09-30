@@ -45,6 +45,9 @@ field()  { awk -F: -v n="$2" -v f="$3" '$1 == n { print $f }' "$SB/etc/$1"; }
 mode_of(){ stat -c %a -- "$1"; }
 owner_of(){ stat -c %u:%g -- "$1"; }
 sha()    { sha256sum -- "$@" | awk '{print $1}'; }
+# st_field TABLE NAME KEY - read UMC's state tables (var/lib/umc/TABLE.tsv)
+st_field() { awk -F'\t' -v n="$2" -v k="$3" '$1 == n { for (i = 2; i <= NF; i++) if (index($i, k "=") == 1) print substr($i, length(k) + 2) }' "$SB/var/lib/umc/$1.tsv" 2>/dev/null; }
+st_row()   { grep -qs "^$2"$'\t' "$SB/var/lib/umc/$1.tsv"; }
 today()  { echo $(( $(date -u +%s) / 86400 )); }
 new_key() { local f; f=$(mktemp -u "${BATS_TMPDIR:-/tmp}/k.XXXXXX"); ssh-keygen -q -t ed25519 -N '' -C "${1:-test}" -f "$f"; cat "$f.pub"; rm -f "$f" "$f.pub"; }
 

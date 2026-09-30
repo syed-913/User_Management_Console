@@ -94,3 +94,11 @@ teardown() { rm -f /tmp/shadow /tmp/passwd; }
     contains "lckpwdf interop"
     contains "script integrity"
 }
+
+@test "live: bulk apply with parallel home creation finishes (no wait on the lckpwdf helper)" {
+    { echo "username"; for i in $(seq 1 20); do echo "bulk.live$i"; done; } > /tmp/bulk-live.csv
+    run timeout 120 "$UMC" --no-color --yes apply -f /tmp/bulk-live.csv
+    expect 0
+    contains "created in parallel"
+    [ "$(ls -d /home/bulk.live* | wc -l)" -eq 20 ]
+}
