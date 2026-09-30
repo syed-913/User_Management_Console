@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | "umc audit" detects common account misconfigurations, maps them to CIS Benchmark control titles, and returns exit code 10 with --fail-on so CI and monitoring can act on it. |
 | **Method** | A sandbox is seeded with 8 known problems; the audit is run in text and JSON form and with --fail-on high. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `41699b1` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-12` |
 | **Verdict** | ✅ PASS |
 
@@ -13,7 +13,7 @@
 ```text
 
 $ umc audit
-  UMC compliance audit  Debian-like fixture · 23 checks · 2026-09-30 12:46 UTC
+  UMC compliance audit  Debian-like fixture · 24 checks · 2026-09-30 15:13 UTC
   FAIL  AUD-01  critical Only root has UID 0  (1)
           - toor: has UID 0 (full root privileges)
           CIS: "Ensure root is the only UID 0 account"
@@ -69,6 +69,7 @@ $ umc audit
   PASS  AUD-21  info     Accounts expiring within 14 days
   PASS  AUD-22  info     Onboarding: temporary passwords not yet changed
   PASS  AUD-23  info     Offboarded accounts past their retention period
+  PASS  AUD-24  low      login.defs and PAM use the same password hashing algorithm
 
   Summary: 3 critical, 4 high, 4 medium, 2 low, 0 info
 

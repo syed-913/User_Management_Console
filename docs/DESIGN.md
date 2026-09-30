@@ -363,11 +363,11 @@ faster code. The expensive steps are C programs in both cases: `openssl` or
 
 The language sets the constant factor; how often the fixed work is repeated
 sets the total. Measured in [E-11](../evidence/E-11-performance.md): about
-4.5× faster than a `useradd` loop on 12 cores and 2.4× on one core, with the
+4.2× faster than a `useradd` loop on 12 cores and 2.1× on one core, with the
 same hashing algorithm on both sides.
 
-The same numbers show the limits. For **one** user UMC takes about 250 ms
-against `useradd`'s 15 ms, because every UMC transaction journals, validates,
+The same numbers show the limits. For **one** user UMC took 389 ms
+against `useradd`'s 39 ms in the published run (about 10×; it varies with machine load), because every UMC transaction journals, validates,
 verifies through NSS and writes an audit record. With **yescrypt on a single
 core**, `newusers` is faster, because it hashes in-process and UMC starts one
 `mkpasswd` per password. Hashing yescrypt in-process would need
