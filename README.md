@@ -34,13 +34,15 @@ $ sudo umc rollback --last                  # byte-for-byte undo
 
 ## Contents
 
-[Why](#why-umc-exists) ·
+[Who needs this](#who-needs-this) ·
+[What is new](#what-is-actually-new-here) ·
 [Highlights](#highlights) ·
 [Quick start](#quick-start) ·
 [Console](#the-console) ·
 [Commands](#commands) ·
 [Bulk onboarding](#bulk-onboarding-from-hr-exports) ·
 [Safety model](#safety-model) ·
+[Performance](#performance) ·
 [Security](#security) ·
 [Configuration](#configuration) ·
 [Compatibility](#compatibility) ·
@@ -48,14 +50,60 @@ $ sudo umc rollback --last                  # byte-for-byte undo
 [Comparison](#how-umc-compares) ·
 [Limitations](#limitations)
 
-## Why UMC exists
+## Who needs this
 
 In an enterprise, human identities belong in Active Directory or FreeIPA,
-reached through SSSD. **Local accounts do not go away**, though: break-glass
-accounts, service accounts, air-gapped and OT hosts, appliances, golden images,
-and every host before it joins a domain. UMC manages those. It is designed to
-coexist with SSSD: it never touches directory accounts, checks NSS before
-using a name or ID, and flushes `nscd`/`sssd` caches after a change.
+reached through SSSD. **Local accounts do not go away**, though, and they are
+usually the least governed part of access management: created by hand, rarely
+reviewed, and "audited" through shell history. UMC is for the places where
+local accounts are unavoidable:
+
+| Situation | How it is usually handled | What UMC adds |
+|---|---|---|
+| **Break-glass accounts**, the way in when the directory is down | created once by hand; nobody knows when they were last rotated | rotate, lock and unlock with a tamper-evident record of who did it; protected from deletion |
+| **Air-gapped and regulated networks**: OT/ICS, defence, labs, payment zones | no directory, no Ansible control node, often no Python; change boards want to see the change first | one auditable file; `--dry-run` produces the exact diff to attach to the change request; rollback if it goes wrong |
+| **Seasonal bulk onboarding**: university labs each semester, training classrooms, CTF events, contractor waves | a spreadsheet, a `useradd` loop and one shared default password | apply the export as it is; unique temporary passwords with a deadline; accounts that expire at term end; one-command offboarding |
+| **Small organisations without an identity provider** | accounts drift from who actually works there; nobody knows who still has sudo | plan/apply straight from HR data; revoking only the access UMC granted; an access-review export |
+| **Leavers and incidents** | removing access means remembering password, SSH keys, sudo, groups, sessions and cron | `umc user offboard` does all of it in one reversible, logged step |
+| **Golden images, appliances, containers** | accounts baked in by ad-hoc scripts | `--root DIR`: the same transactional engine on an offline tree |
+| **Audits** (CIS Benchmarks, ISO/IEC 27001 access control, PCI DSS requirement 8, SOX access reviews) | evidence assembled by hand | `umc audit` (CIS-mapped, JSON, CI exit codes) and `umc export` |
+
+UMC coexists with a directory: it never touches directory accounts, checks NSS
+before using a name or ID, and flushes `nscd`/`sssd` caches after a change.
+**If every host is already joined to AD/FreeIPA and configuration management
+covers the rest, UMC's role shrinks to break-glass and service accounts.**
+
+## What is actually new here
+
+Being feature-rich is not the same as being new, so here is the honest version.
+**None of UMC's techniques is new on its own.** Write-then-rename commits come
+from shadow-utils and databases, plan/apply from Terraform, idempotency from
+Ansible, hash-chained logs from audit systems. What UMC adds is the
+**combination**: database-style transactional guarantees and infrastructure-as-code
+planning, applied to Linux's flat-file account databases, for hosts where the
+usual tools cannot run. Among the tools and projects compared
+[below](#how-umc-compares), none of them:
+
+1. **treats a whole batch of account changes as one transaction**: validated,
+   journaled, committed across all four files, reversible with `rollback`, and
+   recovered automatically after a crash. shadow-utils replaces each file safely,
+   but keeps no record from which a batch could be undone;
+2. **checks its own blast radius**: an independent byte-level comparison
+   refuses to commit any entry the operation did not declare. During
+   development it caught a real bug in UMC ([DESIGN.md §14](docs/DESIGN.md#14-bugs-the-safety-nets-caught-during-development));
+3. **honours both locking conventions** (shadow-utils' `FILE.lock` *and*
+   glibc/PAM's `/etc/.pwd.lock`), and never rolls back over another program's
+   write. Getting this wrong is a known pitfall; at least one reimplementation
+   of shadow-utils tracks it as an open issue
+   ([uutils/shadow#240](https://github.com/uutils/shadow/issues/240));
+4. **turns raw HR exports into a reviewable plan for local accounts**: format
+   inference, identity matching across monthly exports, mover-safe revocation
+   of only the access it granted, onboarding deadlines;
+5. **needs nothing but bash, coreutils and util-linux**, so it runs on the
+   air-gapped host itself, and **proves each claim with a reproducible report**
+   in [`evidence/`](evidence/README.md).
+
+If you know a tool that already does all of this, please open an issue.
 
 ## Highlights
 
@@ -69,9 +117,9 @@ using a name or ID, and flushes `nscd`/`sssd` caches after a change.
 | **Reads HR exports as they are** | any delimiter, BOM, UTF-16, CRLF, nested JSON, HR column names and status words; shows its interpretation first | [E-14](evidence/E-14-messy-hr-files.md) |
 | **Onboarding with a deadline** | unique temporary passwords that must be changed within 24 h, or the account locks | [E-15](evidence/E-15-onboarding-deadline.md) |
 | **Joiner / mover / leaver** | roles, HR-attribute rules, revoking only the access UMC granted, reversible offboarding before deletion | [tests](tests/integration/bulk.bats) |
-| **Compliance audit** | 23 checks mapped to CIS Benchmark controls; `--fail-on` for CI | [E-12](evidence/E-12-audit.md) |
+| **Compliance audit** | 24 checks mapped to CIS Benchmark controls; `--fail-on` for CI | [E-12](evidence/E-12-audit.md) |
 | **Tamper-evident audit log** | hash-chained JSON Lines plus structured journald fields | [E-13](evidence/E-13-tamper-evident-log.md) |
-| **Fast in bulk** | 1,000 users with homes and hashed passwords: **5.2 s**, vs 20.8 s for a `useradd` loop and 17.0 s for `newusers` (same container, 12 CPUs) | [E-11](evidence/E-11-performance.md) |
+| **Efficient in bulk** | 1,000 users with hashed passwords and homes: **~4.5× faster than a `useradd` loop** with the same hashing (2.4× on one core); slower for a single user. [Honest numbers below](#performance) | [E-11](evidence/E-11-performance.md) |
 
 Every row links to a report generated by a script in [`poc/`](poc/) that anyone
 can re-run in a throw-away container. See the [evidence index](evidence/README.md).
@@ -209,6 +257,30 @@ flowchart LR
 
 Details: [docs/DESIGN.md](docs/DESIGN.md).
 
+## Performance
+
+UMC is not faster *code*: the heavy lifting (hashing, copying home
+directories) is done by C programs in both cases. It does **less repeated
+work**. A `useradd` loop starts a process, takes the locks and rewrites all
+four account files, plus their backups, **once per user**; UMC does that
+**once per batch**, and spreads the hashing and home directories over the CPU
+cores. From [E-11](evidence/E-11-performance.md), 1,000 users with the same
+hashing algorithm on both sides (12-core container):
+
+| 1,000 users | UMC `apply` | `useradd` loop + `chpasswd` | `newusers` |
+|---|---|---|---|
+| SHA-512, 12 cores | **4.8 s** | 21.6 s | - |
+| SHA-512, 1 core | **10.8 s** | 25.8 s | - |
+| yescrypt, 12 cores | **7.1 s** | 32.0 s | 16.7 s |
+| yescrypt, 1 core | 22.6 s | 31.5 s | **18.6 s** |
+| **a single user** | 257 ms | **15 ms** | - |
+
+Where UMC loses, and why: on one core with yescrypt, `newusers` hashes inside
+its own process while UMC starts one `mkpasswd` per password. For a single
+user, UMC's fixed safety work (journal, validation, NSS verification, audit
+record) costs about a quarter of a second. So use `apply` for batches, not a
+loop of `user create`.
+
 ## Security
 
 - **Hardened runtime:** fixed `PATH`, `LC_ALL=C`, `umask 077`, `IFS`;
@@ -218,7 +290,7 @@ Details: [docs/DESIGN.md](docs/DESIGN.md).
 - **Writes inside home directories run as the user** (`setpriv`), so planted
   symlinks cannot redirect them.
 - **Lock means lock:** `!` *and* account expiry, because a `!` alone still admits SSH keys.
-- **Audit:** `umc audit` runs 23 checks (UID 0, empty passwords, duplicates,
+- **Audit:** `umc audit` runs 24 checks (UID 0, empty passwords, duplicates,
   file permissions, weak hashes, NOPASSWD sudo, locked accounts that still
   have keys...), mapped to CIS Benchmark control titles, as text or JSON.
 - **Audit trail:** `journalctl UMC_ACTION=user.offboard` and
@@ -243,7 +315,7 @@ chroot, a test fixture) instead of `/`.
 
 ## Compatibility
 
-| Distribution | Container tests (126) | VM, libvirt | Notes |
+| Distribution | Container tests (129) | VM, libvirt | Notes |
 |---|---|---|---|
 | RHEL 9 (UBI 9) | ✅ | not yet booted | box `generic/rhel9` |
 | RHEL 8 (UBI 8) | ✅ | - | bash 4.4: the oldest supported |
@@ -262,7 +334,7 @@ one, runs a smoke test and prints which boxes work for you.
 ## Testing and evidence
 
 ```bash
-tests/run-in-docker.sh                 # 126 tests in a throw-away Debian 12 container
+tests/run-in-docker.sh                 # 129 tests in a throw-away Debian 12 container
 tests/run-in-docker.sh --all           # the 9-distribution matrix (what CI runs)
 vagrant up rocky9 && vagrant provision rocky9 --provision-with test   # + SELinux/sshd end-to-end
 poc/run.sh                             # regenerate every evidence report

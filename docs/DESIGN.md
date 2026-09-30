@@ -18,6 +18,7 @@ design decision".
 - [12. Threat model](#12-threat-model)
 - [13. Trade-offs and alternatives considered](#13-trade-offs-and-alternatives-considered)
 - [14. Bugs the safety nets caught during development](#14-bugs-the-safety-nets-caught-during-development)
+- [15. Performance: where the time goes](#15-performance-where-the-time-goes)
 
 ---
 
@@ -343,3 +344,33 @@ These show that the protections are not theoretical. Each became a test:
     journal state is now written at journal time and later only renamed into
     place (no free space needed), and every transition is checked: UMC can
     fail, but it can no longer report a success the journal disagrees with.
+
+## 15. Performance: where the time goes
+
+"How can a bash script beat `useradd`, which is written in C?" It doesn't run
+faster code. The expensive steps are C programs in both cases: `openssl` or
+`mkpasswd` for hashing, `cp`/`chown` for home directories. The difference is
+**how often the fixed costs are paid**:
+
+| Fixed cost | `useradd` loop (1,000 users) | `umc apply` (1,000 users) |
+|---|---|---|
+| start a process, load libraries, read configuration | 1,000× | 1× |
+| take the locks | 1,000× | 1× |
+| read, rewrite and fsync all four account files + backups | 1,000× (and the files grow each time) | 1× |
+| NSS lookups for names and IDs | per user | 1 batched `getent` call |
+| hashing | 1 core | all cores (up to 8 processes) |
+| home directories | 1 core | all cores (up to 8 workers) |
+
+The language sets the constant factor; how often the fixed work is repeated
+sets the total. Measured in [E-11](../evidence/E-11-performance.md): about
+4.5× faster than a `useradd` loop on 12 cores and 2.4× on one core, with the
+same hashing algorithm on both sides.
+
+The same numbers show the limits. For **one** user UMC takes about 250 ms
+against `useradd`'s 15 ms, because every UMC transaction journals, validates,
+verifies through NSS and writes an audit record. With **yescrypt on a single
+core**, `newusers` is faster, because it hashes in-process and UMC starts one
+`mkpasswd` per password. Hashing yescrypt in-process would need
+`crypt_gensalt(3)`, which no standard command-line tool exposes. The first
+version of this benchmark compared UMC's SHA-512 against `newusers`' yescrypt;
+that was unfair, and it was caught and corrected before publication.

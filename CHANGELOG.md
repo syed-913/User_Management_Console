@@ -40,7 +40,7 @@ explained in [docs/DESIGN.md](docs/DESIGN.md).
 | F-26 | shells not checked | must be in `/etc/shells` and exist |
 | F-27 | moved homes nested; parents created `0700` | refuses existing targets; parents `0755` |
 | F-28 | invalid characters silently stripped | rejected with a reason |
-| F-29 | audit mixed locked and empty passwords | 23 checks with severities and CIS mapping |
+| F-29 | audit mixed locked and empty passwords | 24 checks with severities and CIS mapping |
 | F-30 | export CSV broke on commas; formula injection | RFC 4180 quoting; formulas neutralised |
 | F-31 | logged `$?` of an unrelated command; no actor | journald fields + hash-chained JSONL; `loginuid` |
 | F-32 | interactive only; `BASE_DIR` hard-coded; artificial `sleep`s | CLI with exit codes; `--root`; no fake delays |
@@ -57,7 +57,8 @@ explained in [docs/DESIGN.md](docs/DESIGN.md).
 - `audit` (CIS-mapped), `export` (access review), `policy show|set`
 - `history`, `show`, `rollback`, `recover`, `locks`, `log verify`, `doctor`
 - Subordinate UID/GID ranges for rootless containers; `pam_faillock` reset on unlock
-- Test-suite (126 tests + 4 VM end-to-end tests), 9-distribution container matrix, evidence reports, CI
+- Parallel password hashing for SHA-512 and yescrypt; warning (doctor, policy, audit AUD-24) when `login.defs` and PAM use different hash algorithms
+- Test-suite (129 tests + 4 VM end-to-end tests), 9-distribution container matrix, evidence reports, CI
 
 ### Removed
 
