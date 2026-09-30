@@ -907,6 +907,7 @@ txn_commit() {
     local k f i changed=() xchanged=() src nfile=0
     [[ $TXN_PHASE == staged ]] || bug "txn_commit called in phase $TXN_PHASE"
     $MANAGED_DIRTY && _managed_flush
+    st_flush
 
     # 1. Render the staged databases; drop files whose content did not change,
     #    so re-running a command that is already satisfied changes nothing.
@@ -1042,17 +1043,30 @@ txn_verify() {
     fi
     # (b) Live systems: flush name-service caches, then resolve through NSS
     #     exactly like login would.
-    if [[ -z $why ]] && $LIVE; then
+    if [[ -z $why ]] && $LIVE && ((${#TXN_VERIFY[@]})); then
         nss_flush
-        local c kind name id ent
+        # one getent call per database, however many entries were created
+        local c kind name id ent users=() groups=()
+        declare -A seen_u=() seen_g=()
         for c in "${TXN_VERIFY[@]}"; do
             IFS=: read -r kind name id <<< "$c"
-            case $kind in
-                user)  ent=$(getent passwd "$name" 2>/dev/null) || { why="getent cannot see new user '$name'"; break; }
-                       split_fields "$ent"; [[ ${F[2]} == "$id" ]] || { why="getent returns uid ${F[2]} for '$name' (expected $id)"; break; } ;;
-                group) ent=$(getent group "$name" 2>/dev/null) || { why="getent cannot see new group '$name'"; break; }
-                       split_fields "$ent"; [[ ${F[2]} == "$id" ]] || { why="getent returns gid ${F[2]} for '$name' (expected $id)"; break; } ;;
-            esac
+            [[ $kind == user ]] && users+=("$name") || groups+=("$name")
+        done
+        if ((${#users[@]})); then
+            while IFS= read -r ent; do split_fields "$ent"; seen_u[${F[0]}]=${F[2]}; done < <(getent passwd "${users[@]}" 2>/dev/null)
+        fi
+        if ((${#groups[@]})); then
+            while IFS= read -r ent; do split_fields "$ent"; seen_g[${F[0]}]=${F[2]}; done < <(getent group "${groups[@]}" 2>/dev/null)
+        fi
+        for c in "${TXN_VERIFY[@]}"; do
+            IFS=: read -r kind name id <<< "$c"
+            if [[ $kind == user ]]; then
+                [[ -n ${seen_u[$name]+x} ]] || { why="getent cannot see new user '$name'"; break; }
+                [[ ${seen_u[$name]} == "$id" ]] || { why="getent returns uid ${seen_u[$name]} for '$name' (expected $id)"; break; }
+            else
+                [[ -n ${seen_g[$name]+x} ]] || { why="getent cannot see new group '$name'"; break; }
+                [[ ${seen_g[$name]} == "$id" ]] || { why="getent returns gid ${seen_g[$name]} for '$name' (expected $id)"; break; }
+            fi
         done
     fi
     [[ -z $why ]] && return 0
@@ -2052,25 +2066,72 @@ admin_group() {
 }
 
 # --- UMC's own state (journaled with the accounts it describes) -----------------
-# $STATE/managed        TSV: name uid external_id email created source groups_granted
-# $STATE/locks/NAME     why and how UMC locked an account (so unlock can undo exactly that)
-# $STATE/onboarding/N   temporary-password deadline
-# $STATE/offboarded/N   what offboarding removed (so it can be reinstated)
-# $STATE/retired-ids    IDs of deleted accounts (never reused unless reuse_ids=yes)
+# $STATE/managed.tsv     name uid external_id email created source groups_granted
+# $STATE/locks.tsv       why and how UMC locked an account (so unlock undoes exactly that)
+# $STATE/onboarding.tsv  temporary-password deadlines
+# $STATE/offboarded.tsv  what offboarding removed (so it can be reinstated)
+# $STATE/retired-ids     IDs of deleted accounts (never reused unless reuse_ids=yes)
+# One file per kind, not one per user: a 1,000-user import stages a handful
+# of files instead of a thousand. Tables are kept in memory and written once,
+# just before the commit, as part of the same transaction as the accounts.
 # Every write into a staging file is checked: a write cut short by a full
 # disk must stop the transaction here, not reach the commit.
 stage_write_failed() { die "$E_FAIL" "cannot write the staged copy of $1 (disk full?)" "nothing was changed" "free space in ${STATE}, then retry"; }
-state_put() {   # PATH LINE...
-    txn_xfile "$1" 0600 0 0
-    printf '%s\n' "${@:2}" > "$REPLY" || stage_write_failed "$1"
+state_del() { [[ -e $1 ]] && txn_xdelete "$1"; return 0; }   # delete a file as part of the transaction
+
+# Tables of "NAME<TAB>key=value<TAB>key=value..." records.
+# shellcheck disable=SC2034  # used through namerefs (local -n _T=ST_$table)
+declare -A ST_onboarding=() ST_locks=() ST_offboarded=() ST_READY=() ST_DIRTY=()
+st_load() {   # TABLE
+    [[ -n ${ST_READY[$1]+x} ]] && return 0
+    ST_READY[$1]=1
+    local -n _T=ST_$1
+    local line f=$STATE/$1.tsv
+    _T=()
+    [[ -f $f ]] || return 0
+    while IFS= read -r line; do [[ -n $line ]] && _T[${line%%$'\t'*}]=$line; done < "$f"
 }
-state_del() { [[ -e $1 ]] && txn_xdelete "$1"; return 0; }
-kv_get() {      # FILE KEY -> REPLY ('' if missing)
+st_has()   { st_load "$1"; local -n _T=ST_$1; [[ -n ${_T[$2]+x} ]]; }
+st_names() { st_load "$1"; local -n _T=ST_$1; NAMES=("${!_T[@]}"); }
+st_get() {    # TABLE NAME KEY -> REPLY (returns 1 if the record or key is missing)
     REPLY=""
-    [[ -f $1 ]] || return 1
-    local k v
-    while IFS='=' read -r k v; do [[ $k == "$2" ]] && { REPLY=$v; return 0; }; done < "$1"
+    st_load "$1"
+    local -n _T=ST_$1
+    [[ -n ${_T[$2]+x} ]] || return 1
+    local kv
+    split_tabs "${_T[$2]}"
+    for kv in "${T[@]:1}"; do [[ ${kv%%=*} == "$3" ]] && { REPLY=${kv#*=}; return 0; }; done
     return 1
+}
+st_put() {    # TABLE NAME key=value...   (replaces the whole record)
+    st_load "$1"
+    local -n _T=ST_$1
+    local t=$1 n=$2 kv line=$2
+    shift 2
+    for kv; do line+=$'\t'${kv//[$'\t\n']/ }; done
+    # shellcheck disable=SC2004  # _T is associative (nameref): the $ is required
+    _T[$n]=$line
+    ST_DIRTY[$t]=1
+}
+st_set() {    # TABLE NAME key=value  (adds or replaces one key of an existing record)
+    st_load "$1"
+    local -n _T=ST_$1
+    local k=${3%%=*} kv out=()
+    [[ -n ${_T[$2]+x} ]] || return 1
+    split_tabs "${_T[$2]}"
+    for kv in "${T[@]:1}"; do [[ ${kv%%=*} == "$k" ]] || out+=("$kv"); done
+    st_put "$1" "$2" "${out[@]}" "$3"
+}
+st_del() { st_load "$1"; local -n _T=ST_$1; [[ -n ${_T[$2]+x} ]] || return 0; unset "_T[$2]"; ST_DIRTY[$1]=1; }
+st_flush() {  # write every changed table into the transaction (called by txn_commit)
+    local t
+    for t in "${!ST_DIRTY[@]}"; do _st_flush_one "$t"; done
+    ST_DIRTY=()
+}
+_st_flush_one() {
+    local -n _T=ST_$1
+    txn_xfile "$STATE/$1.tsv" 0600 0 0
+    if ((${#_T[@]})); then printf '%s\n' "${_T[@]}" | sort > "$REPLY"; else : > "$REPLY"; fi || stage_write_failed "$STATE/$1.tsv"
 }
 
 declare -A MANAGED=()   # name -> full TSV line (staged view)
@@ -2080,8 +2141,8 @@ managed_load() {
     MANAGED_READY=true
     MANAGED=()
     local line
-    [[ -f $STATE/managed ]] || return 0
-    while IFS= read -r line; do [[ -n $line ]] && MANAGED[${line%%$'\t'*}]=$line; done < "$STATE/managed"
+    [[ -f $STATE/managed.tsv ]] || return 0
+    while IFS= read -r line; do [[ -n $line ]] && MANAGED[${line%%$'\t'*}]=$line; done < "$STATE/managed.tsv"
 }
 # Changes are kept in memory and written once, just before the commit
 # (a bulk apply of 1,000 users sorts the file once, not 1,000 times).
@@ -2093,9 +2154,9 @@ managed_put() {   # NAME UID EXTID EMAIL CREATED SOURCE GROUPS
 }
 managed_del() { managed_load; [[ -n ${MANAGED[$1]+x} ]] || return 0; unset "MANAGED[$1]"; MANAGED_DIRTY=true; }
 _managed_flush() {
-    txn_xfile "$STATE/managed" 0600 0 0
+    txn_xfile "$STATE/managed.tsv" 0600 0 0
     local f=$REPLY
-    if ((${#MANAGED[@]})); then printf '%s\n' "${MANAGED[@]}" | sort > "$f"; else : > "$f"; fi || stage_write_failed "$STATE/managed"
+    if ((${#MANAGED[@]})); then printf '%s\n' "${MANAGED[@]}" | sort > "$f"; else : > "$f"; fi || stage_write_failed "$STATE/managed.tsv"
     MANAGED_DIRTY=false
 }
 # TAB is an IFS *whitespace* character, so 'read' would merge empty fields;
@@ -2236,8 +2297,10 @@ op_user_create() {
     local n=${UO[name]} class=normal uid gid upg=true today exp minp maxp warnp inact shell home g last
     [[ ${UO[system]:-0} == 1 ]] && class=system
     db_exists PW "$n" && bug "op_user_create: '$n' already exists"
-    nss_user_exists "$n" && die "$E_CONFLICT" "a directory (LDAP/SSSD) account named '$n' already exists" "nothing was changed" \
-        "pick another name: a local account would shadow the directory account"
+    if [[ ${UO[nss_checked]:-0} != 1 ]] && nss_user_exists "$n"; then
+        die "$E_CONFLICT" "a directory (LDAP/SSSD) account named '$n' already exists" "nothing was changed" \
+            "pick another name: a local account would shadow the directory account"
+    fi
     if [[ -n ${UO[group]:-} ]]; then
         upg=false
         if [[ ${UO[group]} =~ ^[0-9]+$ ]]; then
@@ -2258,7 +2321,9 @@ op_user_create() {
     else
         db_exists GR "$n" && die "$E_CONFLICT" "a group named '$n' already exists" "nothing was changed" \
             "use --group $n to make it the primary group, or pick another user name"
-        nss_group_exists "$n" && die "$E_CONFLICT" "a directory (LDAP/SSSD) group named '$n' already exists" "nothing was changed"
+        if [[ ${UO[nss_checked]:-0} != 1 ]] && nss_group_exists "$n"; then
+            die "$E_CONFLICT" "a directory (LDAP/SSSD) group named '$n' already exists" "nothing was changed"
+        fi
         if [[ ${UO[uid_prealloc]:-0} == 1 ]]; then
             uid=${UO[uid]}                     # already allocated (and NSS-checked) by id_alloc
         elif [[ -n ${UO[uid]:-} ]]; then
@@ -2318,7 +2383,7 @@ op_user_passwd() {   # NAME HASH FORCE_CHANGE(0|1)
     user_need "$1"
     local h=$2
     # A UMC-locked account stays locked: setting a password is not an unlock.
-    if [[ -f $STATE/locks/$1 && $S_HASH == \!* ]]; then h="!$h"; LOCK_KEPT=true; else LOCK_KEPT=false; fi
+    if st_has locks "$1" && [[ $S_HASH == \!* ]]; then h="!$h"; LOCK_KEPT=true; else LOCK_KEPT=false; fi
     today_days
     S_HASH=$h S_LAST=$REPLY
     [[ $3 == 1 ]] && S_LAST=0
@@ -2331,26 +2396,27 @@ op_user_lock() {   # NAME SOURCE REASON
     ALREADY=false
     if [[ $S_HASH == \!* && $S_EXPIRE == 1 ]]; then ALREADY=true; return 0; fi
     prev=$S_EXPIRE
-    if [[ -f $STATE/locks/$n ]]; then          # keep the ORIGINAL expiry from the first lock
-        kv_get "$STATE/locks/$n" prev_expire && prev=$REPLY
-        kv_get "$STATE/locks/$n" added_bang && added=$REPLY
+    if st_has locks "$n"; then                 # keep the ORIGINAL expiry from the first lock
+        st_get locks "$n" prev_expire && prev=$REPLY
+        st_get locks "$n" added_bang && added=$REPLY
     fi
     if [[ $S_HASH != \!* ]]; then S_HASH="!$S_HASH"; added=yes; fi
     # '!' only disables the password; the expiry date also stops SSH keys (F-19).
     S_EXPIRE=1
     sp_stage "$n"
     now_epoch; now=$REPLY
-    state_put "$STATE/locks/$n" "source=$src" "reason=${reason//$'\n'/ }" "added_bang=$added" "prev_expire=$prev" "ts=$now" "actor=$ACTOR"
+    st_put locks "$n" "source=$src" "reason=$reason" "added_bang=$added" "prev_expire=$prev" "ts=$now" "actor=$ACTOR"
 }
 
 op_user_unlock() {   # NAME
-    local n=$1 lf=$STATE/locks/$1 newh exp added=unknown
+    local n=$1 newh exp added=unknown had=false
     user_need "$n"
     ALREADY=false
     newh=$S_HASH exp=$S_EXPIRE
-    if [[ -f $lf ]]; then
-        kv_get "$lf" added_bang; added=$REPLY
-        kv_get "$lf" prev_expire; exp=$REPLY
+    if st_has locks "$n"; then
+        had=true
+        st_get locks "$n" added_bang; added=$REPLY
+        st_get locks "$n" prev_expire; exp=$REPLY
         [[ $added == yes ]] && newh=${S_HASH#!}
     else
         [[ $S_HASH == \!* ]] && newh=${S_HASH#!}
@@ -2362,7 +2428,7 @@ op_user_unlock() {   # NAME
             fi
         fi
     fi
-    if [[ $newh == "$S_HASH" && $exp == "$S_EXPIRE" && ! -f $lf ]]; then ALREADY=true; return 0; fi
+    if [[ $newh == "$S_HASH" && $exp == "$S_EXPIRE" ]] && ! $had; then ALREADY=true; return 0; fi
     # Stripping '!' from a bare "!" leaves an EMPTY hash, i.e. a passwordless
     # account. v1 did exactly that (F-07); passwd -u refuses, and so does UMC.
     [[ -n $newh ]] || die "$E_CONFLICT" "unlocking '$n' would leave an empty password field (passwordless login)" \
@@ -2371,7 +2437,7 @@ op_user_unlock() {   # NAME
     [[ $REPLY == none ]] && warn "'$n' has no password: after unlocking, only SSH keys can be used to log in"
     S_HASH=$newh S_EXPIRE=$exp
     sp_stage "$n"
-    state_del "$lf"
+    st_del locks "$n"
     TXN_EFFECTS+=("faillock|$n")
 }
 
@@ -2474,7 +2540,7 @@ op_user_offboard() {   # NAME REASON
     local n=$1 g removed=() priv now sudo_had=no
     guard_account "$n" offboard
     ALREADY=false
-    if [[ -f $STATE/offboarded/$n ]]; then ALREADY=true; return 0; fi
+    if st_has offboarded "$n"; then ALREADY=true; return 0; fi
     op_user_lock "$n" offboard "${2:-offboarded}"
     user_groups "$n"
     for g in "${GROUPS_OF[@]}"; do
@@ -2486,10 +2552,9 @@ op_user_offboard() {   # NAME REASON
     sudo_file_for "$n"
     if [[ -e $REPLY ]]; then sudo_had=yes; sudo_stage_revoke "$n"; fi
     now_epoch; now=$REPLY
-    local IFS=,
-    state_put "$STATE/offboarded/$n" "ts=$now" "actor=$ACTOR" "reason=${2:-}" "removed_groups=${removed[*]}" \
-        "sudo_revoked=$sudo_had" "delete_after=$((now + CFG[offboard_retention_days] * 86400))"
-    unset IFS
+    join_by , "${removed[@]}"
+    st_put offboarded "$n" "ts=$now" "actor=$ACTOR" "reason=${2:-}" "removed_groups=$REPLY" \
+        "sudo_revoked=$sudo_had" "delete_after=$((now + CFG[offboard_retention_days] * 86400))" "source=${OFFBOARD_SOURCE:-cli}"
     TXN_EFFECTS+=("kill|$n|$U_UID")
     TXN_EFFECTS+=("keys-disable|$n|$U_UID|$U_GID|$U_HOME")
     [[ ${CFG[archive_home_on_offboard]} == yes ]] && TXN_EFFECTS+=("archive-home|$n|$U_UID|$U_HOME")
@@ -2498,15 +2563,15 @@ op_user_offboard() {   # NAME REASON
 
 # The inverse of offboarding, for people who come back.
 op_user_reinstate() {   # NAME
-    local n=$1 of=$STATE/offboarded/$1 g
+    local n=$1 g groups
     user_need "$n"
-    [[ -f $of ]] || die "$E_NOTFOUND" "'$n' was not offboarded by UMC" "nothing was changed" "to unlock it, use: umc user unlock $n"
+    st_has offboarded "$n" || die "$E_NOTFOUND" "'$n' was not offboarded by UMC" "nothing was changed" "to unlock it, use: umc user unlock $n"
+    st_get offboarded "$n" removed_groups; groups=$REPLY
     op_user_unlock "$n"
-    kv_get "$of" removed_groups
-    for g in ${REPLY//,/ }; do db_exists GR "$g" && group_member_add "$g" "$n"; done
-    kv_get "$of" sudo_revoked
+    for g in ${groups//,/ }; do db_exists GR "$g" && group_member_add "$g" "$n"; done
+    st_get offboarded "$n" sudo_revoked
     [[ $REPLY == yes ]] && warn "offboarding had revoked a sudo rule for '$n'; re-grant it explicitly if still needed (umc sudo grant $n)"
-    state_del "$of"
+    st_del offboarded "$n"
     TXN_EFFECTS+=("keys-enable|$n|$U_UID|$U_GID|$U_HOME")
 }
 
@@ -2545,7 +2610,7 @@ op_user_delete() {   # NAME ; UO: keep_home force
     fi
     subid_del "$n"
     sudo_stage_revoke "$n"
-    state_del "$STATE/locks/$n"; state_del "$STATE/onboarding/$n"; state_del "$STATE/offboarded/$n"
+    st_del locks "$n"; st_del onboarding "$n"; st_del offboarded "$n"
     managed_del "$n"
     retire_ids "$U_UID" "${DELETED_UPG:+$U_GID}"
     local cron
@@ -3340,7 +3405,7 @@ plan_build() {
         for n in "${!MANAGED[@]}"; do
             [[ -n ${matched[$n]+x} || -n ${TARGET_OF[$n]+x} ]] && continue
             db_exists PW "$n" || continue
-            [[ -f $STATE/offboarded/$n ]] && continue
+            st_has offboarded "$n" && continue
             ACT+=("offboard|$n|")
             UPD[$n:why]="not in the file (--prune)"
         done
@@ -3352,18 +3417,18 @@ _plan_existing() {   # NAME RECORD STATE
     local n=$1 r=$2 st=$3 changed=false g want=() have=() add=() rem=() granted="" k
     user_load "$n"
     if [[ $st == absent ]]; then
-        if [[ -f $STATE/offboarded/$n ]]; then PLAN_UNCHANGED=$((PLAN_UNCHANGED + 1)); else ACT+=("offboard|$n|$r"); UPD[$n:why]="status: absent"; fi
+        if st_has offboarded "$n"; then PLAN_UNCHANGED=$((PLAN_UNCHANGED + 1)); else ACT+=("offboard|$n|$r"); UPD[$n:why]="status: absent"; fi
         return
     fi
-    if [[ -f $STATE/offboarded/$n ]]; then
-        kv_get "$STATE/offboarded/$n" source
+    if st_has offboarded "$n"; then
+        st_get offboarded "$n" source
         if [[ $REPLY == import ]]; then ACT+=("reinstate|$n|$r"); changed=true
         else _imp_err "$r" "'$n' was offboarded by hand; reinstate it explicitly (umc user reinstate $n)"; return; fi
     fi
     if [[ $st == locked ]]; then
         [[ $S_HASH == \!* && $S_EXPIRE == 1 ]] || { ACT+=("lock|$n|$r"); changed=true; }
-    elif [[ -f $STATE/locks/$n ]]; then
-        kv_get "$STATE/locks/$n" source
+    elif st_has locks "$n"; then
+        st_get locks "$n" source
         [[ $REPLY == import ]] && { ACT+=("unlock|$n|$r"); changed=true; }
     fi
     # attribute drift
@@ -3371,8 +3436,8 @@ _plan_existing() {   # NAME RECORD STATE
     [[ -n ${REC[$r:shell]:-} && ${REC[$r:shell]} != "$U_SHELL" ]] && UPD[$n:shell]=${REC[$r:shell]}
     if [[ -n ${REC[$r:expire]+x} ]]; then
         local cur=$S_EXPIRE
-        [[ -f $STATE/onboarding/$n ]] && { kv_get "$STATE/onboarding/$n" intended_expire; cur=$REPLY; }
-        [[ $st == locked || -f $STATE/locks/$n ]] && { kv_get "$STATE/locks/$n" prev_expire && cur=$REPLY; }
+        st_has onboarding "$n" && { st_get onboarding "$n" intended_expire; cur=$REPLY; }
+        st_has locks "$n" && st_get locks "$n" prev_expire && cur=$REPLY
         [[ ${REC[$r:expire]} != "$cur" ]] && UPD[$n:expire]=${REC[$r:expire]}
     fi
     # groups: add what is wanted; remove only what UMC itself granted earlier
@@ -3627,6 +3692,14 @@ _imp_write_rejects() {
 _apply_execute() {
     local a kind n r creates=() i now
     for a in "${ACT[@]}"; do [[ ${a%%|*} == create ]] && creates+=("$a"); done
+    # Names: one NSS round-trip for the whole batch instead of two per user.
+    if $LIVE && ((${#creates[@]})); then
+        local names=() taken
+        for a in "${creates[@]}"; do IFS='|' read -r kind n r <<< "$a"; names+=("$n"); done
+        taken=$( { getent passwd "${names[@]}"; getent group "${names[@]}"; } 2>/dev/null | cut -d: -f1 | sort -u | tr '\n' ' ')
+        [[ -z ${taken// } ]] || die "$E_CONFLICT" "these names already exist in the directory service (LDAP/SSSD): $taken" \
+            "nothing was changed" "give those people different user names (a username column or --map)"
+    fi
     # IDs for every new user in one go (and one NSS round-trip).
     local need_ids=0
     for a in "${creates[@]}"; do IFS='|' read -r kind n r <<< "$a"; [[ -z ${REC[$r:uid]:-} ]] && need_ids=$((need_ids + 1)); done
@@ -3658,7 +3731,7 @@ _apply_execute() {
         IFS='|' read -r kind n r <<< "$a"
         case $kind in
             create)
-                UO=([name]=$n [gecos]=${REC[$r:gecos]:-})
+                UO=([name]=$n [gecos]=${REC[$r:gecos]:-} [nss_checked]=1)
                 [[ -n ${REC[$r:uid]:-} ]] && UO[uid]=${REC[$r:uid]} || { UO[uid]=${pool[pi]}; UO[uid_prealloc]=1; pi=$((pi + 1)); }
                 [[ -n ${REC[$r:shell]:-} ]] && UO[shell]=${REC[$r:shell]}
                 [[ -n ${REC[$r:home]:-} ]] && UO[home]=${REC[$r:home]}
@@ -3686,10 +3759,9 @@ _apply_execute() {
                 [[ -n ${UPD[$n:expire]+x} ]] && UO[expire]=${UPD[$n:expire]}
                 [[ -n ${UPD[$n:add_groups]+x} ]] && UO[add_groups]=${UPD[$n:add_groups]// /,}
                 [[ -n ${UPD[$n:remove_groups]+x} ]] && UO[remove_groups]=${UPD[$n:remove_groups]// /,}
-                if [[ -f $STATE/onboarding/$n && -n ${UO[expire]+x} ]]; then
+                if st_has onboarding "$n" && [[ -n ${UO[expire]+x} ]]; then
                     # still onboarding: keep the deadline backstop, remember the new end date
-                    kv_get "$STATE/onboarding/$n" deadline; local dl=$REPLY
-                    state_put "$STATE/onboarding/$n" "issued=$now" "deadline=$dl" "intended_expire=${UO[expire]}" "txn=$TXN_ID"
+                    st_set onboarding "$n" "intended_expire=${UO[expire]}"
                     unset 'UO[expire]'
                 fi
                 op_user_modify "$n"
@@ -3704,8 +3776,7 @@ _apply_execute() {
             reinstate) op_user_reinstate "$n" ;;
             offboard)
                 UO=()
-                op_user_offboard "$n" "${UPD[$n:why]:-status in ${IMP_FILE##*/}}"
-                txn_xfile "$STATE/offboarded/$n"; printf 'source=import\n' >> "$REPLY" || stage_write_failed "offboarding record" ;;
+                OFFBOARD_SOURCE=import op_user_offboard "$n" "${UPD[$n:why]:-status in ${IMP_FILE##*/}}" ;;
         esac
         if [[ $kind == update && -n ${UPD[$n:keys]+x} ]]; then
             user_load "$n"; KEYS_FOR[$n]=${REC[$r:ssh_key]}; TXN_EFFECTS+=("keys|$n|$U_UID|$U_GID|$U_HOME")
@@ -3902,16 +3973,16 @@ aud_run() {
         [[ -f $f ]] && grep -qx 'state=committing' -- "$f" && { k=${f%/meta}; _hit AUD-20 "${k##*/}" "transaction was interrupted"; }
     done
     local now; now_epoch; now=$REPLY
-    for f in "$STATE"/onboarding/*; do
-        [[ -f $f ]] || continue
-        kv_get "$f" deadline
-        if ((now >= REPLY)); then _hit AUD-22 "${f##*/}" "deadline PASSED, account not yet locked (is the sweep timer running?)"
-        else printf -v v '%(%Y-%m-%d %H:%M UTC)T' "$REPLY"; _hit AUD-22 "${f##*/}" "must change the temporary password by $v"; fi
+    st_names onboarding
+    for n in "${NAMES[@]}"; do
+        st_get onboarding "$n" deadline
+        if ((now >= REPLY)); then _hit AUD-22 "$n" "deadline PASSED, account not yet locked (is the sweep timer running?)"
+        else printf -v v '%(%Y-%m-%d %H:%M UTC)T' "$REPLY"; _hit AUD-22 "$n" "must change the temporary password by $v"; fi
     done
-    for f in "$STATE"/offboarded/*; do
-        [[ -f $f ]] || continue
-        kv_get "$f" delete_after
-        [[ $REPLY =~ ^[0-9]+$ ]] && ((now >= REPLY)) && _hit AUD-23 "${f##*/}" "retention period is over"
+    st_names offboarded
+    for n in "${NAMES[@]}"; do
+        st_get offboarded "$n" delete_after
+        [[ $REPLY =~ ^[0-9]+$ ]] && ((now >= REPLY)) && _hit AUD-23 "$n" "retention period is over"
     done
     return 0
 }
@@ -4032,8 +4103,8 @@ cmd_export() {
                 keys=$(grep -cE '(^|[[:space:]])(ssh-|ecdsa-|sk-)' -- "$R$U_HOME/.ssh/authorized_keys" 2>/dev/null || echo 0)
             group_by_gid "$U_GID" && pg=$REPLY || pg=$U_GID
             managed_field "$n" 5 && { managed=yes src=$REPLY; }
-            [[ -f $STATE/onboarding/$n ]] && { kv_get "$STATE/onboarding/$n" deadline; printf -v onb '%(%Y-%m-%dT%H:%MZ)T' "$REPLY"; }
-            [[ -f $STATE/offboarded/$n ]] && { kv_get "$STATE/offboarded/$n" ts; printf -v off '%(%Y-%m-%d)T' "$REPLY"; }
+            st_get onboarding "$n" deadline && printf -v onb '%(%Y-%m-%dT%H:%MZ)T' "$REPLY"
+            st_get offboarded "$n" ts && printf -v off '%(%Y-%m-%d)T' "$REPLY"
             local vals=("$n" "$U_UID" "$U_GID" "$pg" "${GROUPS_OF[*]}" "${U_GECOS%%,*}" "$U_SHELL" "$U_HOME" "$pst" "$last" "${S_MAX:-}" "$exp" "$lock" "$sudo" "$keys" "$managed" "$src" "$onb" "$off")
             if [[ $fmt == csv ]]; then
                 cells=()
@@ -4153,7 +4224,7 @@ engine_begin() {
     lk_acquire_db
     txn_recover
     db_load
-    ID_READY=false MANAGED_READY=false
+    ID_READY=false MANAGED_READY=false ST_READY=() ST_DIRTY=()
     txn_begin "$1" "$2"
 }
 # engine_read - for read-only commands: no locks (every file is replaced by
@@ -4206,13 +4277,16 @@ _effects_preview() {
 # is idempotent, so a failed step is fixed by simply re-running the command.
 EFFECT_FAILS=0 EFFECT_LOG=()
 effects_run() {
-    local e kind a b c d e5 ks
+    local e kind a b c d e5 ks homes=()
     EFFECT_FAILS=0 EFFECT_LOG=()
+    for e in "${TXN_EFFECTS[@]}"; do [[ $e == home\|* ]] && homes+=("$e"); done
+    if ((${#homes[@]} >= 16)); then _homes_parallel "${homes[@]}"; fi
     for e in "${TXN_EFFECTS[@]}"; do
         IFS='|' read -r kind a b c d e5 <<< "$e"
         EFFECT_ERR=""
         case $kind in
             home)
+                ((${#homes[@]} >= 16)) && continue            # done in parallel above
                 if home_create "$a" "$b" "$c" "$d" "$e5"; then info "home directory $d is ready"; EFFECT_LOG+=("home:$d")
                 else _effect_failed; fi ;;
             keys)
@@ -4263,6 +4337,35 @@ effects_run() {
     return 0
 }
 _effect_failed() { warn "${EFFECT_ERR:-a follow-up step failed}"; EFFECT_FAILS=$((EFFECT_FAILS + 1)); }
+
+# Bulk imports: create home directories with one worker per CPU core (max 8).
+# Every failure is still reported by name; nothing is skipped silently.
+_homes_parallel() {
+    local list=("$@") w workers n=$# i e kind a b c d e5 f ok=0 pids=()
+    workers=$(nproc 2>/dev/null || echo 2); ((workers > 8)) && workers=8
+    for ((w = 0; w < workers; w++)); do
+        (
+            for ((i = w; i < n; i += workers)); do
+                IFS='|' read -r kind a b c d e5 <<< "${list[i]}"
+                EFFECT_ERR=""
+                if home_create "$a" "$b" "$c" "$d" "$e5"; then echo "ok|$d"; else echo "fail|$EFFECT_ERR"; fi
+            done > "$WORK/homes.$w"
+        ) &
+        pids+=($!)
+    done
+    # Wait for THESE workers only. A bare 'wait' would also wait for the
+    # lckpwdf helper (a coprocess that lives as long as UMC does): a deadlock
+    # the 1,000-user benchmark found.
+    wait "${pids[@]}"
+    for ((w = 0; w < workers; w++)); do
+        [[ -f $WORK/homes.$w ]] || continue
+        while IFS='|' read -r f e; do
+            if [[ $f == ok ]]; then ok=$((ok + 1)); else EFFECT_ERR=$e; _effect_failed; fi
+        done < "$WORK/homes.$w"
+    done
+    info "$ok home director$( ((ok == 1)) && echo y || echo ies) ready (created in parallel by $workers workers)"
+    EFFECT_LOG+=("homes:$ok")
+}
 
 home_move() {   # NAME OLD NEW
     local src=$R$2 dst=$R$3
@@ -4347,7 +4450,7 @@ onboard_stage() {
     backstop=$((dl / 86400 + 1))         # the day AFTER the deadline: never cuts in early
     intended=${UO[expire]:-}
     if [[ -n $intended ]] && ((intended < backstop)); then backstop=$intended; fi
-    state_put "$STATE/onboarding/$1" "issued=$now" "deadline=$dl" "intended_expire=$intended" "txn=$TXN_ID"
+    st_put onboarding "$1" "issued=$now" "deadline=$dl" "intended_expire=$intended" "txn=$TXN_ID"
     cred_add "$1" "$2" "$dl" "$3"
     ONBOARD_DEADLINE=$dl
     REPLY=$backstop
@@ -4573,27 +4676,26 @@ cmd_sweep() {
     if [[ ${1:-} == --install-timer ]]; then _sweep_install_timer; return; fi
     [[ $# -eq 0 ]] || usage_err "usage: umc sweep [--install-timer]"
     engine_begin sweep ""
-    local f n dl intended now activated=() expired=() due=() of
+    local n dl intended now activated=() expired=() due=() pending=()
     now_epoch; now=$REPLY
-    for f in "$STATE"/onboarding/*; do
-        [[ -f $f ]] || continue
-        n=${f##*/}
-        if ! user_load "$n"; then state_del "$f"; continue; fi
-        kv_get "$f" deadline; dl=$REPLY
-        kv_get "$f" intended_expire; intended=$REPLY
+    st_names onboarding; pending=("${NAMES[@]}")
+    for n in "${pending[@]}"; do
+        if ! user_load "$n"; then st_del onboarding "$n"; continue; fi
+        st_get onboarding "$n" deadline; dl=$REPLY
+        st_get onboarding "$n" intended_expire; intended=$REPLY
         if [[ $S_LAST != 0 ]]; then
             # The user changed the temporary password: activation complete.
             S_EXPIRE=$intended
-            sp_stage "$n"; state_del "$f"; activated+=("$n")
+            sp_stage "$n"; st_del onboarding "$n"; activated+=("$n")
         elif ((now >= dl)); then
             UO=(); op_user_lock "$n" onboarding-deadline "temporary password not changed by the deadline"
-            state_del "$f"; expired+=("$n")
+            st_del onboarding "$n"; expired+=("$n")
         fi
     done
-    for of in "$STATE"/offboarded/*; do
-        [[ -f $of ]] || continue
-        kv_get "$of" delete_after
-        [[ $REPLY =~ ^[0-9]+$ ]] && ((now >= REPLY)) && due+=("${of##*/}")
+    st_names offboarded
+    for n in "${NAMES[@]}"; do
+        st_get offboarded "$n" delete_after
+        [[ $REPLY =~ ^[0-9]+$ ]] && ((now >= REPLY)) && due+=("$n")
     done
     TXN_SUMMARY="sweep: ${#activated[@]} activated, ${#expired[@]} expired"
     if engine_commit; then
@@ -4953,7 +5055,7 @@ cmd_user_passwd() {
     if [[ $mode == generate ]]; then
         user_load "$name"
         UO[expire]=$S_EXPIRE
-        [[ -f $STATE/onboarding/$name ]] && { kv_get "$STATE/onboarding/$name" intended_expire; UO[expire]=$REPLY; }
+        st_get onboarding "$name" intended_expire && UO[expire]=$REPLY
         onboard_stage "$name" "$temp" "$U_GECOS"
         S_EXPIRE=$REPLY S_HASH=$hash S_LAST=0
         $LOCK_KEPT && S_HASH="!$hash"
@@ -5158,7 +5260,7 @@ cmd_user_delete() {
         read -r -p "  Permanently delete user '$name'? Type the user name to confirm: " ans
         [[ $ans == "$name" ]] || die "$E_USAGE" "not confirmed" "nothing was changed"
     fi
-    [[ -f $STATE/offboarded/$name ]] || warn "$name was not offboarded first (recommended: umc user offboard $name)"
+    st_has offboarded "$name" || warn "$name was not offboarded first (recommended: umc user offboard $name)"
     local archive=""
     op_user_delete "$name"
     # Archive and verify BEFORE the accounts change: if this fails, nothing happened.
@@ -5199,8 +5301,8 @@ cmd_user_show() {
         "") last="never" ;;
         *) days_to_date "$S_LAST"; last=$REPLY ;;
     esac
-    [[ -f $STATE/onboarding/$n ]] && { kv_get "$STATE/onboarding/$n" deadline; printf -v onb '%(%Y-%m-%d %H:%M UTC)T' "$REPLY"; }
-    [[ -f $STATE/offboarded/$n ]] && { kv_get "$STATE/offboarded/$n" ts; printf -v offb '%(%Y-%m-%d)T' "$REPLY"; }
+    st_get onboarding "$n" deadline && printf -v onb '%(%Y-%m-%d %H:%M UTC)T' "$REPLY"
+    st_get offboarded "$n" ts && printf -v offb '%(%Y-%m-%d)T' "$REPLY"
     sudo_file_for "$n"; [[ -f $REPLY ]] && sudo="yes (${REPLY#"$R"})"
     user_groups "$n"
     admin_group && [[ " ${GROUPS_OF[*]} " == *" $REPLY "* ]] && sudo="${sudo/no/}${sudo:+ }via group $REPLY"

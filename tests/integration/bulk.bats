@@ -37,7 +37,7 @@ teardown() { drop_sandbox; }
     entry passwd alice.khan
     [ "$(field shadow alice.khan 3)" = 0 ]                      # must change at first login
     [ -n "$(field shadow alice.khan 8)" ]                        # deadline backstop
-    [ -f "$SB/var/lib/umc/onboarding/alice.khan" ]
+    st_row onboarding alice.khan
     local slip; slip=$(ls "$SB"/root/umc/credentials/*.csv)
     [ "$(mode_of "$slip")" = 600 ]
     [ "$(grep -c , "$slip")" = 5 ]                               # header + 4 users
@@ -122,12 +122,12 @@ teardown() { drop_sandbox; }
     printf 'employee_id,username,status\n5,keep.me,Active\n6,leave.me,Terminated\n' > "$SB/b.csv"
     run umc --yes apply -f "$SB/b.csv"
     expect 0
-    [ -f "$SB/var/lib/umc/offboarded/leave.me" ]
+    st_row offboarded leave.me
     printf 'employee_id,username\n6,leave.me\n' > "$SB/c.csv"
     run umc --yes apply -f "$SB/c.csv" --prune
     expect 0
-    [ -f "$SB/var/lib/umc/offboarded/keep.me" ]                 # UMC-managed and missing -> offboarded
-    [ ! -f "$SB/var/lib/umc/offboarded/bobby" ]                 # never managed by UMC -> untouched
+    st_row offboarded keep.me                                   # UMC-managed and missing -> offboarded
+    ! st_row offboarded bobby                                   # never managed by UMC -> untouched
     [ "$(field shadow bobby 8)" = "" ]
 }
 
