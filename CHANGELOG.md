@@ -59,10 +59,12 @@ explained in [docs/DESIGN.md](docs/DESIGN.md).
 - Subordinate UID/GID ranges for rootless containers; `pam_faillock` reset on unlock
 - Parallel password hashing for SHA-512 and yescrypt; warning (doctor, policy, audit AUD-24) when `login.defs` and PAM use different hash algorithms
 - Test-suite (129 tests + 4 VM end-to-end tests), 9-distribution container matrix, evidence reports, CI
+- `tests/vagrant/verify.sh`: boots each pinned box, runs everything, removes what it downloaded; six VMs pass (E-16)
 
 ### Removed
 
 - `shared/umc.sh` (a copy for the old NFS share; VMs now sync the repository itself)
+- `tests/vagrant/smoke.sh` (replaced by `verify.sh --smoke`)
 - "Clean orphaned home dirs" (it treated directory-service users' homes as orphans; see F-20)
 
 ## 1.0 (tag `v1.0`)

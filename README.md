@@ -315,22 +315,32 @@ chroot, a test fixture) instead of `/`.
 
 ## Compatibility
 
-| Distribution | Container tests (129) | VM, libvirt | Notes |
+| Distribution | Container tests (129) | VM on libvirt/KVM, 133 tests ([E-16](evidence/E-16-vm-end-to-end.md)) | Notes |
 |---|---|---|---|
-| RHEL 9 (UBI 9) | ✅ | not yet booted | box `generic/rhel9` |
+| RHEL 9 (UBI 9) | ✅ | not run: the box needs a Red Hat subscription | box `generic/rhel9` |
 | RHEL 8 (UBI 8) | ✅ | - | bash 4.4: the oldest supported |
-| Rocky Linux 9 | ✅ | not yet booted | `lckpwdf` via python3 |
-| AlmaLinux 9 | ✅ | not yet booted | |
+| Rocky Linux 9 | ✅ | ✅ SELinux enforcing | `lckpwdf` via python3 |
+| AlmaLinux 9 | ✅ | ✅ SELinux enforcing | |
 | Fedora 42 | ✅ | - | minimal image has no python3/perl: `lckpwdf` interop reported as unavailable |
-| Debian 12 | ✅ | not yet booted | `lckpwdf` via perl |
-| Debian 13 | ✅ | not yet booted | `flock --fcntl` (util-linux 2.41), tmpfs `/tmp` |
-| Ubuntu 22.04 | ✅ | not yet booted | |
-| Ubuntu 24.04 | ✅ | not yet booted | |
+| Debian 12 | ✅ | ✅ | `lckpwdf` via perl |
+| Debian 13 | ✅ | ✅ | `flock --fcntl` (util-linux 2.41), tmpfs `/tmp` |
+| Ubuntu 22.04 | ✅ | ✅ | |
+| Ubuntu 24.04 | ✅ | ✅ | |
+
+VM results are from one run of `tests/vagrant/verify.sh libvirt` on 2026-09-30
+(UMC `d570975`, vagrant-libvirt 0.12.2): the container suite plus four end-to-end
+tests (SELinux labels, SSH key login refused by a UMC lock, journald, systemd
+timer). Two tests skip on every VM, as designed: one checks the "no systemd"
+error path, and either the SELinux test (no SELinux on Debian/Ubuntu) or the
+yescrypt test (no yescrypt `mkpasswd` on the RHEL family) does not apply.
 
 The [Vagrantfile](Vagrantfile) defines pinned boxes for **libvirt, VirtualBox,
-VMware, Hyper-V and Parallels**. `tests/vagrant/verify.sh --smoke <provider>` boots
-each one, runs a smoke test and prints which boxes work for you; it destroys
-every VM and removes every box it downloaded afterwards.
+VMware, Hyper-V and Parallels**, and records the boxes that were tried and do
+not boot. `tests/vagrant/verify.sh --smoke <provider>` boots each one, runs a
+smoke test and prints which boxes work for you. Either mode destroys every VM
+and removes every box, image volume and network the run added (a network named
+with `--keep-network` stays defined, stopped); anything that existed before is
+left as it was.
 
 ## Testing and evidence
 
@@ -376,7 +386,10 @@ poc/run.sh                             # regenerate every evidence report
 - `.xlsx` is not read directly: save as CSV.
 - Tamper evidence is local: root can rewrite the chain. Forward journald
   off the host for real protection.
-- VM verification of the pinned Vagrant boxes is in progress (see the table above).
+- VMs were verified on libvirt/KVM only. The VirtualBox, VMware, Hyper-V and
+  Parallels boxes are pinned from the public catalogue but have not been booted
+  here: `tests/vagrant/verify.sh --smoke <provider>` checks them on yours.
+  RHEL 9 needs a subscription and was not run.
 
 ## Project history
 
