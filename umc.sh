@@ -512,7 +512,7 @@ audit_event() {
 #       1. /etc/.pwd.lock - lckpwdf(3), a POSIX fcntl() lock used by glibc,
 #          pam_unix (password changes, incl. chpasswd on Debian), vipw and
 #          systemd-sysusers. Taken with 'flock --fcntl' (an OFD lock, which
-#          conflicts with lckpwdf) on util-linux >= 2.39; older systems get a
+#          conflicts with lckpwdf) on util-linux >= 2.41; older systems get a
 #          tiny python3 or perl helper that holds the same fcntl lock for as
 #          long as UMC runs (and loses it automatically if UMC is killed).
 #       2. /etc/passwd.lock, shadow.lock, group.lock, gshadow.lock - the
@@ -781,7 +781,8 @@ db_render() {
     local -n _L=${1}_L
     local line out=()
     for line in "${_L[@]}"; do [[ $line == "$DEL" ]] || out+=("$line"); done
-    if ((${#out[@]})); then printf '%s\n' "${out[@]}" > "$2"; else : > "$2"; fi
+    if ((${#out[@]})); then printf '%s\n' "${out[@]}" > "$2"; else : > "$2"; fi ||
+        die "$E_FAIL" "cannot write the staged copy of ${1} (disk full?)" "nothing was changed" "free space in ${STATE}, then retry"
 }
 
 # Comma-separated member lists (group field 4, gshadow fields 3 and 4):
@@ -802,7 +803,7 @@ list_rename() {
 # --- transactions ---------------------------------------------------------------
 TXN_ACTION="" TXN_SUMMARY="" WORK="" TXN_SEQ=0 TXN_ORDER=publish TXN_RESTORE=false TXN_CHANGED=false
 declare -A TXN_TARGET=() TXN_XNEW=() TXN_XIDX=()
-declare -a TXN_XFILES=() TXN_VERIFY=() TXN_EFFECTS=() TXN_INSTALLED=()
+declare -a TXN_XFILES=() TXN_VERIFY=() TXN_EFFECTS=() TXN_INSTALLED=() TXN_UNDO=()
 
 txn_begin() {   # ACTION SUMMARY
     TXN_ACTION=$1 TXN_SUMMARY=$2
@@ -812,7 +813,7 @@ txn_begin() {   # ACTION SUMMARY
     WORK=$(mktemp -d -- "$STATE/work.XXXXXX") || die "$E_FAIL" "cannot create a private work directory in $STATE"
     CLEANUP+=("$WORK")
     mkdir -- "$WORK/new" "$WORK/x" || die "$E_FAIL" "cannot prepare $WORK"
-    TXN_TARGET=() TXN_XNEW=() TXN_XIDX=() TXN_XFILES=() TXN_VERIFY=() TXN_EFFECTS=() TXN_INSTALLED=()
+    TXN_TARGET=() TXN_XNEW=() TXN_XIDX=() TXN_XFILES=() TXN_VERIFY=() TXN_EFFECTS=() TXN_INSTALLED=() TXN_UNDO=()
     TXN_ORDER=publish TXN_RESTORE=false TXN_CHANGED=false MANAGED_DIRTY=false
     TXN_PHASE=staged
     SUBID_NEXT=() SUBID_HAS=()
@@ -843,15 +844,20 @@ txn_xfile() {
 }
 txn_xdelete() { txn_xfile "$1"; : > "$REPLY.delete"; }
 
-# Installs NEW as DST using the commit protocol. $3 = "db" keeps a DST- backup.
+# Installs NEW as DST using the commit protocol. Before the rename, the
+# original is hard-linked to a backup name (FILE- for the four databases, the
+# shadow-utils convention; a hidden .NAME.umc-pre otherwise). A hard link costs
+# no disk space, so undoing a half-finished commit is a plain rename() - it
+# still works when the disk is full.
 _install_file() {
-    local new=$1 dst=$2 kind=${3:-x} dir base tmp meta
+    local new=$1 dst=$2 kind=${3:-x} dir base tmp meta m o g bak="" existed=false
     dir=${dst%/*} base=${dst##*/}
     [[ -d $dir ]] || mkdir -p -- "$dir" || return 1
     tmp=$(mktemp -- "$dir/.$base.umc.XXXXXX") || return 1
     CLEANUP+=("$tmp")
     cat -- "$new" > "$tmp" || return 1
     if [[ -e $dst ]]; then
+        existed=true
         chown --reference="$dst" -- "$tmp" && chmod --reference="$dst" -- "$tmp" || return 1
         if cap_has selinux; then chcon --reference="$dst" -- "$tmp" 2>/dev/null || true; fi
     else
@@ -860,15 +866,32 @@ _install_file() {
         chown "$o:$g" -- "$tmp" && chmod "$m" -- "$tmp" || return 1
     fi
     sync -- "$tmp" || return 1                       # data on disk before the rename
-    if [[ $kind == db && -e $dst ]]; then
-        ln -f -- "$dst" "$dst-" || return 1          # shadow-utils style FILE- backup
+    if $existed; then
+        if [[ $kind == db ]]; then bak=$dst-; else bak=$dir/.$base.umc-pre; fi
+        ln -f -- "$dst" "$bak" || return 1
     fi
     mv -f -T -- "$tmp" "$dst" || return 1
-    if cap_has selinux && [[ ! -e $dst- || $kind != db ]] && cap_has restorecon; then
-        restorecon -- "$dst" 2>/dev/null || true
+    TXN_UNDO+=("${bak:-NEW}|$dst")
+    if ! $existed && cap_has selinux && cap_has restorecon; then
+        restorecon -- "$dst" 2>/dev/null || true     # new file: label from policy
     fi
     TXN_INSTALLED+=("$dst")
     return 0
+}
+
+# Undo the files this commit already replaced, newest first, using the
+# hard-linked originals (no free space needed). Returns 1 if any step failed.
+_txn_fast_undo() {
+    local i e bak dst rc=0
+    for ((i = ${#TXN_UNDO[@]} - 1; i >= 0; i--)); do
+        e=${TXN_UNDO[i]} bak=${e%%|*} dst=${e#*|}
+        if [[ $bak == NEW ]]; then rm -f -- "$dst" || rc=1
+        elif [[ $bak == DELETED:* ]]; then mv -f -T -- "${bak#DELETED:}" "$dst" || rc=1
+        else mv -f -T -- "$bak" "$dst" || rc=1
+        fi
+    done
+    sync -- "$ETC" 2>/dev/null || sync
+    return "$rc"
 }
 
 # Test hook: UMC_FAULT=kill-after-install:N makes UMC SIGKILL itself right
@@ -935,7 +958,9 @@ txn_commit() {
     for i in "${xchanged[@]}"; do
         f=${TXN_XFILES[i]}
         if [[ -e $WORK/x/$i.delete ]]; then
-            rm -f -- "$f" || _txn_commit_failed "$f"
+            local keep=${f%/*}/.${f##*/}.umc-pre
+            ln -f -- "$f" "$keep" && rm -f -- "$f" || _txn_commit_failed "$f"
+            TXN_UNDO+=("DELETED:$keep|$f")
             TXN_INSTALLED+=("$f")
         else
             _install_file "$WORK/x/$i" "$f" x || _txn_commit_failed "$f"
@@ -950,6 +975,11 @@ txn_commit() {
     _txn_meta_set state committed
     TXN_PHASE=committed TXN_CHANGED=true
     critical_end
+    local e b
+    for e in "${TXN_UNDO[@]}"; do                    # hidden hard-link backups are no longer needed
+        b=${e%%|*}; b=${b#DELETED:}
+        [[ $b == */.*.umc-pre ]] && rm -f -- "$b"
+    done
 
     # 6. Verify, and undo everything if the result is not what was intended.
     txn_verify
@@ -961,6 +991,15 @@ txn_commit() {
 # that was already replaced, from the journal.
 _txn_commit_failed() {
     local what=$1
+    # 1. rename the hard-linked originals back: needs no free space
+    if _txn_fast_undo; then
+        _txn_meta_set state rolled-back 2>/dev/null
+        TXN_PHASE=rolledback
+        critical_end
+        die "$E_ROLLEDBACK" "could not install $what (disk full or I/O error?)" "" \
+            "check free space (df) and 'dmesg', then retry"
+    fi
+    # 2. fall back to the journal's pre-images
     if _txn_install_images "$TXN_DIR/$TXN_ID" pre; then
         _txn_meta_set state rolled-back
         TXN_PHASE=rolledback
@@ -1121,6 +1160,13 @@ txn_recover() {
     local m d id
     for m in "$TXN_DIR"/*/meta; do
         [[ -f $m ]] || continue
+        # Killed after journaling but before the first rename: nothing was
+        # installed, so the journal entry is simply marked as aborted.
+        if grep -qx 'state=prepared' -- "$m"; then
+            local save=$TXN_ID; TXN_ID=${m%/meta}; TXN_ID=${TXN_ID##*/}
+            _txn_meta_set state aborted; TXN_ID=$save
+            continue
+        fi
         grep -qx 'state=committing' -- "$m" || continue
         d=${m%/meta} id=${d##*/}
         ( cd -- "$d" && sha256sum --quiet -c SHA256SUMS ) >/dev/null 2>&1 ||
@@ -2011,9 +2057,12 @@ admin_group() {
 # $STATE/onboarding/N   temporary-password deadline
 # $STATE/offboarded/N   what offboarding removed (so it can be reinstated)
 # $STATE/retired-ids    IDs of deleted accounts (never reused unless reuse_ids=yes)
+# Every write into a staging file is checked: a write cut short by a full
+# disk must stop the transaction here, not reach the commit.
+stage_write_failed() { die "$E_FAIL" "cannot write the staged copy of $1 (disk full?)" "nothing was changed" "free space in ${STATE}, then retry"; }
 state_put() {   # PATH LINE...
     txn_xfile "$1" 0600 0 0
-    printf '%s\n' "${@:2}" > "$REPLY"
+    printf '%s\n' "${@:2}" > "$REPLY" || stage_write_failed "$1"
 }
 state_del() { [[ -e $1 ]] && txn_xdelete "$1"; return 0; }
 kv_get() {      # FILE KEY -> REPLY ('' if missing)
@@ -2046,7 +2095,7 @@ managed_del() { managed_load; [[ -n ${MANAGED[$1]+x} ]] || return 0; unset "MANA
 _managed_flush() {
     txn_xfile "$STATE/managed" 0600 0 0
     local f=$REPLY
-    if ((${#MANAGED[@]})); then printf '%s\n' "${MANAGED[@]}" | sort > "$f"; else : > "$f"; fi
+    if ((${#MANAGED[@]})); then printf '%s\n' "${MANAGED[@]}" | sort > "$f"; else : > "$f"; fi || stage_write_failed "$STATE/managed"
     MANAGED_DIRTY=false
 }
 # TAB is an IFS *whitespace* character, so 'read' would merge empty fields;
@@ -2069,8 +2118,8 @@ retire_ids() {   # UID GID (either may be empty)
     [[ ${CFG[reuse_ids]} == yes ]] && return 0
     [[ -n ${1:-}${2:-} ]] || return 0
     txn_xfile "$STATE/retired-ids" 0600 0 0
-    [[ -n ${1:-} ]] && printf 'u %s\n' "$1" >> "$REPLY"
-    [[ -n ${2:-} ]] && printf 'g %s\n' "$2" >> "$REPLY"
+    if [[ -n ${1:-} ]]; then printf 'u %s\n' "$1" >> "$REPLY" || stage_write_failed "$STATE/retired-ids"; fi
+    if [[ -n ${2:-} ]]; then printf 'g %s\n' "$2" >> "$REPLY" || stage_write_failed "$STATE/retired-ids"; fi
     return 0
 }
 
@@ -2099,7 +2148,7 @@ subid_alloc() {   # NAME
         SUBID_HAS[$base:$1]=1
         next=${SUBID_NEXT[$base]}
         ((next + count - 1 <= max)) || die "$E_CONFLICT" "no free ${base} range left (${pfx}_MAX=$max)"
-        printf '%s:%s:%s\n' "$1" "$next" "$count" >> "$staged"
+        printf '%s:%s:%s\n' "$1" "$next" "$count" >> "$staged" || stage_write_failed "$f"
         SUBID_NEXT[$base]=$((next + count))
     done
     return 0
@@ -2110,8 +2159,8 @@ subid_del() {   # NAME [NEWNAME]  (delete, or rename when NEWNAME is given)
         f=$ETC/$base
         [[ -f $f ]] && grep -q "^$1:" -- "$f" || continue
         txn_xfile "$f"; staged=$REPLY
-        awk -F: -v OFS=: -v u="$1" -v n="${2:-}" '$1 == u { if (n == "") next; $1 = n } { print }' "$staged" > "$staged.t" &&
-            mv -f -- "$staged.t" "$staged"
+        { awk -F: -v OFS=: -v u="$1" -v n="${2:-}" '$1 == u { if (n == "") next; $1 = n } { print }' "$staged" > "$staged.t" &&
+            mv -f -- "$staged.t" "$staged"; } || stage_write_failed "$f"
     done
     return 0
 }
@@ -2130,7 +2179,7 @@ sudo_stage_grant() {   # PRINCIPAL full|nopasswd COMMANDS
     {
         printf '# Managed by UMC - change it with "umc sudo grant/revoke", not by hand.\n'
         printf '%s ALL=(ALL:ALL) %s%s\n' "$1" "$tag" "${3:-ALL}"
-    } > "$REPLY"
+    } > "$REPLY" || stage_write_failed "sudoers rule"
 }
 sudo_stage_revoke() { sudo_file_for "$1"; state_del "$REPLY"; }
 
@@ -3656,7 +3705,7 @@ _apply_execute() {
             offboard)
                 UO=()
                 op_user_offboard "$n" "${UPD[$n:why]:-status in ${IMP_FILE##*/}}"
-                txn_xfile "$STATE/offboarded/$n"; printf 'source=import\n' >> "$REPLY" ;;
+                txn_xfile "$STATE/offboarded/$n"; printf 'source=import\n' >> "$REPLY" || stage_write_failed "offboarding record" ;;
         esac
         if [[ $kind == update && -n ${UPD[$n:keys]+x} ]]; then
             user_load "$n"; KEYS_FOR[$n]=${REC[$r:ssh_key]}; TXN_EFFECTS+=("keys|$n|$U_UID|$U_GID|$U_HOME")
@@ -4060,16 +4109,16 @@ cmd_policy() {
             if [[ -n $minlen$minclass ]]; then
                 [[ -d $ETC/security ]] || die "$E_FAIL" "$ETC/security does not exist (is PAM installed?)"
                 txn_xfile "$ETC/security/pwquality.conf" 0644 0 0; local pq=$REPLY
-                [[ -n $minlen ]]   && _kv_file_set "$pq" minlen "$minlen" =
-                [[ -n $minclass ]] && _kv_file_set "$pq" minclass "$minclass" =
+                if [[ -n $minlen ]]; then _kv_file_set "$pq" minlen "$minlen" = || stage_write_failed pwquality.conf; fi
+                if [[ -n $minclass ]]; then _kv_file_set "$pq" minclass "$minclass" = || stage_write_failed pwquality.conf; fi
                 grep -qs pam_pwquality "$ETC"/pam.d/* ||
                     warn "pam_pwquality is not in the PAM stack: 'passwd' will not enforce this (UMC does, for passwords it sets). Enable it with authselect (RHEL) or install libpam-pwquality (Debian)."
             fi
             if [[ -n $maxd$mind$warnd ]]; then
                 txn_xfile "$ETC/login.defs"; local ld=$REPLY
-                [[ -n $maxd ]]  && _kv_file_set "$ld" PASS_MAX_DAYS "$maxd" " "
-                [[ -n $mind ]]  && _kv_file_set "$ld" PASS_MIN_DAYS "$mind" " "
-                [[ -n $warnd ]] && _kv_file_set "$ld" PASS_WARN_AGE "$warnd" " "
+                if [[ -n $maxd ]]; then _kv_file_set "$ld" PASS_MAX_DAYS "$maxd" " " || stage_write_failed login.defs; fi
+                if [[ -n $mind ]]; then _kv_file_set "$ld" PASS_MIN_DAYS "$mind" " " || stage_write_failed login.defs; fi
+                if [[ -n $warnd ]]; then _kv_file_set "$ld" PASS_WARN_AGE "$warnd" " " || stage_write_failed login.defs; fi
                 if $existing; then
                     # login.defs only affects accounts created later; this applies it to today's users too.
                     local n umin c=0; defs_get UID_MIN 1000; umin=$REPLY
@@ -4412,7 +4461,7 @@ cmd_rollback() {
     while IFS=$'\t' read -r n rel st; do
         # shellcheck disable=SC2086  # $st is "mode uid gid": three arguments
         txn_xfile "$R$rel" $st
-        if [[ -e $d/pre/$n.absent ]]; then : > "$REPLY.delete"; else cp -- "$d/pre/$n" "$REPLY"; fi
+        if [[ -e $d/pre/$n.absent ]]; then : > "$REPLY.delete"; else cp -- "$d/pre/$n" "$REPLY"; fi || stage_write_failed "$rel"
     done < "$d/files"
     engine_commit || { no_change "nothing to roll back: the files already match the state before $id"; return 0; }
     _txn_meta_set rollback_of "$id"
@@ -4593,7 +4642,7 @@ cmd_doctor() {
     case $REPLY in
         flock)   _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_GREEN}yes${C_RESET} (flock --fcntl)" ;;
         python3|perl) _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_GREEN}yes${C_RESET} (fcntl via $REPLY; this util-linux has no flock --fcntl)" ;;
-        *)       _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_YELLOW}no${C_RESET}  (PAM password changes are not excluded; install python3 or util-linux >= 2.39)" ;;
+        *)       _dr "lckpwdf interop (/etc/.pwd.lock)" "${C_YELLOW}no${C_RESET}  (PAM password changes are not excluded; install python3 or util-linux >= 2.41)" ;;
     esac
     _yn openssl6 "cannot hash passwords";       _dr "openssl SHA-512 crypt" "$REPLY"
     pw_hash_method >/dev/null 2>&1;             _dr "password hash method" "${CFG[hash_method]} -> ${REPLY:-sha512}"
