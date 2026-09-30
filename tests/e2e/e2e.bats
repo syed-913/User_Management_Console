@@ -21,7 +21,7 @@ ssh_as() { ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKno
     umc_live --yes user delete e2e.selinux >/dev/null
 }
 
-@test "E-17: a deployed key logs in; a UMC lock refuses it; a '!'-only lock would not" {
+@test "F-19 / E-16: a deployed key logs in; a UMC lock refuses it; a '!'-only lock would not" {
     umc_live user create e2e.ssh --ssh-key "@$KEY.pub" >/dev/null
     ssh_as e2e.ssh                                               # works
     sed -i 's/^e2e.ssh:!/e2e.ssh:!!/' /etc/shadow               # the old-style lock: password only
@@ -30,6 +30,10 @@ ssh_as() { ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKno
     ! ssh_as e2e.ssh
     umc_live user unlock e2e.ssh >/dev/null
     ssh_as e2e.ssh
+    # A real login leaves the user's systemd session manager running for a few
+    # seconds, and 'delete' rightly refuses while processes exist: offboard
+    # first (ends the sessions), then delete - the documented leaver process.
+    umc_live user offboard e2e.ssh >/dev/null
     umc_live --yes user delete e2e.ssh >/dev/null
 }
 

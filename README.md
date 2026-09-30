@@ -328,15 +328,16 @@ chroot, a test fixture) instead of `/`.
 | Ubuntu 24.04 | ✅ | not yet booted | |
 
 The [Vagrantfile](Vagrantfile) defines pinned boxes for **libvirt, VirtualBox,
-VMware, Hyper-V and Parallels**. `tests/vagrant/smoke.sh <provider>` boots each
-one, runs a smoke test and prints which boxes work for you.
+VMware, Hyper-V and Parallels**. `tests/vagrant/verify.sh --smoke <provider>` boots
+each one, runs a smoke test and prints which boxes work for you; it destroys
+every VM and removes every box it downloaded afterwards.
 
 ## Testing and evidence
 
 ```bash
 tests/run-in-docker.sh                 # 129 tests in a throw-away Debian 12 container
 tests/run-in-docker.sh --all           # the 9-distribution matrix (what CI runs)
-vagrant up rocky9 && vagrant provision rocky9 --provision-with test   # + SELinux/sshd end-to-end
+tests/vagrant/verify.sh libvirt rocky9   # boot a VM, run everything incl. SELinux/sshd end-to-end, clean up
 poc/run.sh                             # regenerate every evidence report
 ```
 

@@ -55,7 +55,9 @@ csv() { printf "$2" | ufn 'awk -v D="$1" "$AWK_CSV"' "$1"; }
 @test "CSV: the delimiter is detected (comma, semicolon, tab, pipe)" {
     local d
     for d in , ';' $'\t' '|'; do
-        run bash -c 'printf "a%sb%sc\n1%s2%s3\n4%s5%s6\n" "$1" "$1" "$1" "$1" "$1" "$1" | awk "$2"' _ "$d" "$(ufn 'printf "%s" "$AWK_SNIFF"')"
+        # through ufn: the awk programs run exactly as inside UMC (LC_ALL=C, byte-wise)
+        run bash -c 'printf "a%sb%sc\n1%s2%s3\n4%s5%s6\n" "$1" "$1" "$1" "$1" "$1" "$1"' _ "$d"
+        run ufn 'printf "%s" "$1" | awk "$AWK_SNIFF"' "$output"
         case $d in ,) [ "$output" = 1 ] ;; ';') [ "$output" = 2 ] ;; $'\t') [ "$output" = 3 ] ;; '|') [ "$output" = 4 ] ;; esac
     done
 }
@@ -77,7 +79,9 @@ csv() { printf "$2" | ufn 'awk -v D="$1" "$AWK_CSV"' "$1"; }
 }
 
 @test "accented names are transliterated; non-Latin names are flagged" {
-    run bash -c 'printf "José\tNúñez\t\t\n张伟\t\t\t\n" | awk "$1"' _ "$(ufn 'printf "%s" "$AWK_TRANSLIT"')"
+    # through ufn, i.e. with UMC's LC_ALL=C: under a UTF-8 locale awk would see
+    # characters instead of bytes (the first VM run caught exactly that in this test)
+    run ufn 'printf "José\tNúñez\t\t\n张伟\t\t\t\n" | awk "$AWK_TRANSLIT"'
     [ "$(sed -n 1p <<< "$output")" = $'Jose\tNunez\t\t' ]
     [[ $(sed -n 2p <<< "$output") == *'?'* ]]
 }
