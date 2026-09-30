@@ -16,6 +16,10 @@ if command -v apt-get >/dev/null 2>&1; then
     # optional capabilities
     apt-get install -y -qq --no-install-recommends \
         libpwquality-tools whois >/dev/null 2>&1 || true
+    # en_US.UTF-8 is only needed to run v1 in the evidence scripts: v1's
+    # password rule is an invalid regex in the C locale (finding F-33).
+    apt-get install -y -qq --no-install-recommends locales >/dev/null 2>&1 &&
+        localedef -i en_US -f UTF-8 en_US.UTF-8 || true
     rm -rf /var/lib/apt/lists/*
 elif command -v dnf >/dev/null 2>&1 || command -v microdnf >/dev/null 2>&1; then
     PM=dnf; command -v dnf >/dev/null 2>&1 || PM=microdnf
