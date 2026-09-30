@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "defaults": { "shell": "/bin/bash" },
+  "groups": [ { "name": "developers", "gid": 3000 }, { "name": "support" } ],
+  "users": [
+    { "name": "dev.one", "comment": "Dev One,Platform", "groups": ["developers"],
+      "ssh_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIKegmApVXmxqVJzxbopzeh4gShnep/vByNBn25EU9/h dev.one@laptop"] },
+    { "name": "dev.two", "groups": ["developers", "support"], "expire": "2027-06-30" },
+    { "name": "contractor", "expire": "+90", "password": { "generate": true } }
+  ]
+}

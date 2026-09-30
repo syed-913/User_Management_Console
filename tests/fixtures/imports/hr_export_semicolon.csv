@@ -1,0 +1,6 @@
+﻿Employee ID;First Name;Last Name;E-Mail;Department;Job Title;Contract End;Status;Manager
+1001;Alice;Khan;alice.khan@example.com;Engineering;Platform Engineer;31/12/2027;Active;Bob Stone
+1002;José;Núñez;;Sales;"Account Manager; EMEA";;Active;Bob Stone
+1003;Chen;Wei;chen.wei@example.com;Engineering;SRE;;On leave;Alice Khan
+1004;Mary Ann;O'Brien;mary.obrien@example.com;Finance;Controller;15.06.2027;Active;
+1005;Omar;Farooq;omar.farooq@example.com;Engineering;Intern;2026-12-31;Terminated;Alice Khan

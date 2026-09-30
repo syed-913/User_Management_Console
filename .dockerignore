@@ -1,0 +1,4 @@
+# Only the dependency installer is needed to build test images;
+# the repo is mounted read-only at run time instead.
+*
+!tests/docker/

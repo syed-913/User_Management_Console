@@ -1,0 +1,13 @@
+{
+  "meta": {"exported": "2026-09-30T10:00:00Z", "source": "HRIS"},
+  "data": {
+    "employees": [
+      {"workerId": "E-2001", "name": {"first": "Priya", "last": "Sharma"}, "email": "Priya.Sharma@Example.com",
+       "department": "Engineering", "endDate": null, "active": true},
+      {"workerId": "E-2002", "name": {"first": "Lars", "last": "Østergård"}, "email": "lars.o@example.com",
+       "department": "Support", "endDate": "2027-03-31", "active": true},
+      {"workerId": "E-2003", "name": {"first": "Ana", "last": "Lima"}, "email": "ana.lima@example.com",
+       "department": "Engineering", "active": false}
+    ]
+  }
+}
