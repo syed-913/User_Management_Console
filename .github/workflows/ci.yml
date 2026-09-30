@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax
+        run: bash -n umc.sh
+      - name: shellcheck (umc.sh: zero findings at any severity)
+        run: shellcheck umc.sh
+      - name: shellcheck (helper scripts: warnings and errors)
+        run: shellcheck -S warning -x tests/run.sh tests/run-in-docker.sh tests/docker/install-deps.sh tests/vagrant/*.sh poc/*.sh
+
+  test:
+    needs: lint
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian12, debian13, ubuntu2204, ubuntu2404, rocky9, alma9, fedora42, ubi9, ubi8]
+    steps:
+      - uses: actions/checkout@v4
+      - name: test-suite in a disposable ${{ matrix.distro }} container
+        run: tests/run-in-docker.sh ${{ matrix.distro }}
+
+  evidence:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the v1.0 tag is needed for the before/after scenarios
+      - name: regenerate evidence reports
+        run: poc/run.sh
+      - name: fail if any claim did not hold
+        run: "! grep -l '❌' evidence/E-*.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evidence
+          path: evidence/
