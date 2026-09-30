@@ -178,6 +178,7 @@ finish() {
 trap 'finish; exit 130' INT TERM
 trap finish EXIT
 
+DLERR='could not be found or could not be accessed in the remote catalog|Could not resolve host|Failed to connect to|An error occurred while downloading'
 declare -A RES=() SEL=() E2E=() CNT=()
 for b in "${boxes[@]}"; do
     log=$out/$b.$mode.log
@@ -189,7 +190,14 @@ for b in "${boxes[@]}"; do
     fi
     echo "==> $b: booting ($provider) - log: ${log#"$repo"/}"
     CURRENT=$b
-    if UMC_BOXES=$b vagrant up "$b" --provider="$provider" >>"$log" 2>&1; then
+    booted=false dlfail=false
+    for try in 1 2; do               # a failed download (network) gets one more try; a box that does not boot does not
+        from=$(($(wc -l < "$log") + 1))
+        UMC_BOXES=$b vagrant up "$b" --provider="$provider" >>"$log" 2>&1 && { booted=true; break; }
+        if tail -n "+$from" "$log" | grep -qE "$DLERR"; then dlfail=true; else dlfail=false; break; fi
+        ((try == 1)) && { echo "    $b: the box download failed - trying again in 60 s"; sleep 60; }
+    done
+    if $booted; then
         SEL[$b]=$(grep -oE 'SELinux: [A-Za-z]+' "$log" | tail -1 | cut -d' ' -f2)
         echo "==> $b: running the $mode tests"
         if [[ $mode == smoke ]]; then
@@ -202,6 +210,8 @@ for b in "${boxes[@]}"; do
             if ((fail == 0 && pass > 0)); then RES[$b]="PASS"; else RES[$b]="FAIL"; fi
             E2E[$b]=$(grep -E ': (not )?ok [0-9]+ (F-03 /|F-19 /|journald|the onboarding sweep)' "$log" | sed -E 's/^.*: ((not )?ok [0-9]+ )/\1/')
         fi
+    elif $dlfail; then
+        RES[$b]="FAIL (the box could not be downloaded - network or catalogue problem, see the log)"
     else
         RES[$b]="FAIL (the box did not boot)"
     fi
