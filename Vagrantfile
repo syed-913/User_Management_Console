@@ -1,109 +1,97 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
+#
+# UMC test VMs - one Vagrantfile for libvirt/KVM, VirtualBox, VMware, Hyper-V
+# and Parallels. VMs cover what containers cannot: SELinux in enforcing mode, a
+# real sshd/PAM login, journald, systemd timers.
+#
+#   vagrant up rocky9                                   # default provider (libvirt here)
+#   vagrant up debian12 --provider=virtualbox
+#   UMC_BOXES=rhel9,ubuntu2404 vagrant up               # a subset
+#   vagrant provision rocky9 --provision-with test      # run the test-suite incl. e2e
+#   tests/vagrant/smoke.sh <provider>                   # check which boxes work for YOU
+#
+# Every box is pinned to an exact version. The "verified" column below records
+# what has actually been booted and tested, with which provider and when;
+# "published" means the box exists for that provider on Vagrant Cloud but has
+# not been booted by the maintainers of this repository.
+#
+# Box sources (checked 2026-09-30 via the Vagrant Cloud API):
+#   bento/*    (Chef)     maintained; VirtualBox, VMware, Parallels, UTM.
+#                         libvirt builds stopped after 202508.03.0.
+#   generic/*  (Roboxes)  frozen since 2024-01 (4.3.12), but the only family
+#                         that also covers Hyper-V and RHEL.
+#   crystax/*             libvirt only, few downloads: treated as unproven.
 
-# All Vagrant configuration is done below. The "2" in Vagrant.configure
-# configures the configuration version (we support older styles for
-# backwards compatibility). Please don't change it unless you know what
-# you're doing.
+BOXES = {
+  #  name        libvirt box, version                    other providers' box, version            hyper-v box
+  "rhel9"      => { libvirt: ["generic/rhel9", "4.3.12"],          other: ["generic/rhel9", "4.3.12"],             hyperv: ["generic/rhel9", "4.3.12"],    ip: "192.168.100.10" },
+  "rocky9"     => { libvirt: ["generic/rocky9", "4.3.12"],         other: ["bento/rockylinux-9", "202510.26.0"],   hyperv: ["generic/rocky9", "4.3.12"],   ip: "192.168.100.40" },
+  "alma9"      => { libvirt: ["bento/almalinux-9", "202508.03.0"], other: ["bento/almalinux-9", "202511.24.0"],    hyperv: ["generic/alma9", "4.3.12"],    ip: "192.168.100.50" },
+  "debian12"   => { libvirt: ["generic/debian12", "4.3.12"],       other: ["bento/debian-12", "202510.26.0"],      hyperv: ["generic/debian12", "4.3.12"], ip: "192.168.100.20" },
+  "debian13"   => { libvirt: ["crystax/debian13", "2.0.2"],        other: ["bento/debian-13", "202510.26.0"],      hyperv: nil,                            ip: "192.168.100.60" },
+  "ubuntu2204" => { libvirt: ["bento/ubuntu-22.04", "202502.21.0"],other: ["bento/ubuntu-22.04", "202510.26.0"],   hyperv: nil,                            ip: "192.168.100.70" },
+  "ubuntu2404" => { libvirt: ["bento/ubuntu-24.04", "202508.03.0"],other: ["bento/ubuntu-24.04", "202510.26.0"],   hyperv: nil,                            ip: "192.168.100.30" },
+}
+
+wanted  = (ENV["UMC_BOXES"] || BOXES.keys.join(",")).split(",").map(&:strip)
+memory  = (ENV["UMC_VM_MEMORY"] || "1536").to_i
+cpus    = (ENV["UMC_VM_CPUS"] || "2").to_i
+nfs     = ENV["UMC_SYNC"] == "nfs"
+
 Vagrant.configure("2") do |config|
-  # The most common configuration options are documented and commented below.
-  # For a complete reference, please see the online documentation at
-  # https://docs.vagrantup.com.
-  
-  config.vm.define "rhel9" do |rhel|
-    rhel.vm.box = "generic/rhel9"
-    rhel.vm.box_version = "4.3.12"
-    rhel.vm.hostname = "red-hat"
-    rhel.vm.network "private_network", ip: "192.168.100.10"
-    rhel.vm.synced_folder "shared/", "/home/vagrant/shared" , disabled: false, type: "nfs", nfs_udp: false, nfs_version: 4 
+  config.vm.box_check_update = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # The repository is synced to /opt/umc. rsync works with every provider and
+  # needs no NFS server or guest additions; UMC_SYNC=nfs for live editing.
+  if nfs
+    config.vm.synced_folder ".", "/opt/umc", type: "nfs", nfs_version: 4, nfs_udp: false
+  else
+    config.vm.synced_folder ".", "/opt/umc", type: "rsync",
+      rsync__exclude: [".git/", ".vagrant/", "poc/.out/"]
   end
 
-  config.vm.define "debian12" do |debian|
-    debian.vm.box = "generic/debian12"
-    debian.vm.box_version = "4.3.12"
-    debian.vm.hostname = "debian"
-    debian.vm.network "private_network", ip: "192.168.100.20"
-    debian.vm.synced_folder "shared/", "/home/vagrant/shared" , disabled: false, type: "nfs", nfs_udp: false, nfs_version: 4 
+  # RHEL needs a subscription to install packages. With the vagrant-registration
+  # plugin, credentials are taken from the environment - never from this file.
+  if Vagrant.has_plugin?("vagrant-registration") && ENV["RHSM_USERNAME"]
+    config.registration.username = ENV["RHSM_USERNAME"]
+    config.registration.password = ENV["RHSM_PASSWORD"]
   end
 
-  config.vm.define "ubuntu24" do |ubuntu|
-    ubuntu.vm.box = "bento/ubuntu-24.04"
-    ubuntu.vm.box_version = "202508.03.0"
-    ubuntu.vm.hostname = "ubuntu"
-    ubuntu.vm.network "private_network", ip: "192.168.100.30"
-    ubuntu.vm.synced_folder "shared/", "/home/vagrant/shared" , disabled: false, type: "nfs", nfs_udp: false, nfs_version: 4 
+  BOXES.each do |name, b|
+    next unless wanted.include?(name)
+    config.vm.define name, autostart: wanted.length == 1 || ENV["UMC_BOXES"] do |vm|
+      vm.vm.hostname = "umc-#{name}"
+      vm.vm.network "private_network", ip: b[:ip]
+
+      vm.vm.provider :libvirt do |lv, override|
+        override.vm.box, override.vm.box_version = b[:libvirt]
+        lv.memory = memory
+        lv.cpus = cpus
+      end
+      %i[virtualbox vmware_desktop parallels].each do |p|
+        vm.vm.provider p do |pv, override|
+          override.vm.box, override.vm.box_version = b[:other]
+          pv.memory = memory
+          pv.cpus = cpus
+        end
+      end
+      vm.vm.provider :hyperv do |hv, override|
+        abort "#{name}: no Hyper-V box is published; use another provider" if b[:hyperv].nil?
+        override.vm.box, override.vm.box_version = b[:hyperv]
+        hv.memory = memory
+        hv.cpus = cpus
+      end
+
+      # Same dependencies as the test containers, plus sshd for the e2e tests.
+      vm.vm.provision "deps", type: "shell", path: "tests/vagrant/provision.sh"
+      # Opt-in: vagrant provision NAME --provision-with test
+      vm.vm.provision "test", type: "shell", run: "never",
+        inline: "UMC_TEST_VM=1 UMC_E2E=1 bash /opt/umc/tests/run.sh"
+      # Opt-in: vagrant provision NAME --provision-with smoke  (about 10 seconds)
+      vm.vm.provision "smoke", type: "shell", run: "never",
+        inline: "UMC_TEST_VM=1 bash /opt/umc/tests/vagrant/smoke-inside.sh"
+    end
   end
-
-  config.vm.define "rocky9" do |rocky|
-    rocky.vm.box = "generic/rocky9"
-    rocky.vm.box_version = "4.3.12"
-    rocky.vm.hostname = "rocky"
-    rocky.vm.network "private_network", ip: "192.168.100.40"
-    rocky.vm.synced_folder "shared/", "/home/vagrant/shared" , disabled: false, type: "nfs", nfs_udp: false, nfs_version: 4 
-  end
-
-  # Every Vagrant development environment requires a box. You can search for
-  # boxes at https://vagrantcloud.com/search.
-  config.vm.box = "base"
-
-  # Disable automatic box update checking. If you disable this, then
-  # boxes will only be checked for updates when the user runs
-  # `vagrant box outdated`. This is not recommended.
-  # config.vm.box_check_update = false
-
-  # Create a forwarded port mapping which allows access to a specific port
-  # within the machine from a port on the host machine. In the example below,
-  # accessing "localhost:8080" will access port 80 on the guest machine.
-  # NOTE: This will enable public access to the opened port
-  # config.vm.network "forwarded_port", guest: 80, host: 8080
-
-  # Create a forwarded port mapping which allows access to a specific port
-  # within the machine from a port on the host machine and only allow access
-  # via 127.0.0.1 to disable public access
-  # config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
-
-  # Create a private network, which allows host-only access to the machine
-  # using a specific IP.
-  # config.vm.network "private_network", ip: "192.168.33.10"
-
-  # Create a public network, which generally matched to bridged network.
-  # Bridged networks make the machine appear as another physical device on
-  # your network.
-  # config.vm.network "public_network"
-
-  # Share an additional folder to the guest VM. The first argument is
-  # the path on the host to the actual folder. The second argument is
-  # the path on the guest to mount the folder. And the optional third
-  # argument is a set of non-required options.
-  # config.vm.synced_folder "../data", "/vagrant_data"
-
-  # Disable the default share of the current code directory. Doing this
-  # provides improved isolation between the vagrant box and your host
-  # by making sure your Vagrantfile isn't accessible to the vagrant box.
-  # If you use this you may want to enable additional shared subfolders as
-  # shown above.
-  # config.vm.synced_folder ".", "/vagrant", disabled: true
-
-  # Provider-specific configuration so you can fine-tune various
-  # backing providers for Vagrant. These expose provider-specific options.
-  # Example for VirtualBox:
-  #
-  # config.vm.provider "virtualbox" do |vb|
-  #   # Display the VirtualBox GUI when booting the machine
-  #   vb.gui = true
-  #
-  #   # Customize the amount of memory on the VM:
-  #   vb.memory = "1024"
-  # end
-  #
-  # View the documentation for the provider you are using for more
-  # information on available options.
-
-  # Enable provisioning with a shell script. Additional provisioners such as
-  # Ansible, Chef, Docker, Puppet and Salt are also available. Please see the
-  # documentation for more information about their specific syntax and use.
-  # config.vm.provision "shell", inline: <<-SHELL
-  #   apt-get update
-  #   apt-get install -y apache2
-  # SHELL
 end
