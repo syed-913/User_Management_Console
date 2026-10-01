@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | However a commit is interrupted, the four account files are never torn or mutually inconsistent, and the next UMC run restores the exact state from before an interrupted transaction. |
 | **Method** | The duration of "umc user create" is measured first. Then 400 times: start it, SIGKILL it at a random moment across its whole run, classify the moment from its journal entry (before the journal / journaled but not started / inside the commit / after the commit), run "umc recover", and check every invariant: each file complete and valid, passwd and shadow list the same users, group and gshadow the same groups, the user either fully exists or not at all. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-05` |
 | **Verdict** | ✅ PASS |
 

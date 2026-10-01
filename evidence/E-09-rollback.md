@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | "umc rollback" puts the four account files back exactly as they were before a transaction - verified with SHA-256 - and lists what it does not revert (home directories). |
 | **Method** | 50 users are bulk-created in one transaction; the transaction is rolled back; checksums before and after are compared. Then the rollback itself is rolled back. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-09` |
 | **Verdict** | ✅ PASS |
 

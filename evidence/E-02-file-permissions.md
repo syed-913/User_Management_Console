@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | v1 left /etc/passwd and /etc/group mode 0600 after the first change, so ordinary users could no longer map UIDs to names; v2 keeps the owner, group and mode of all four files exactly as they were. |
 | **Method** | The same "create one user" action is performed with v1 (menu input on stdin) and with v2 in two fresh containers' worth of state; modes are listed and an unprivileged user tries to resolve a name. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-02` |
 | **Verdict** | ✅ PASS |
 

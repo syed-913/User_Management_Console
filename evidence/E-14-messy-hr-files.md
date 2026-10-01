@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | UMC reads HR exports without reformatting: semicolon or comma delimiters, UTF-8 BOM, UTF-16, Windows line endings, quoted fields, accented names, day-first dates, HR status words and nested JSON - and says exactly how it interpreted them. |
 | **Method** | "umc import inspect" and "umc apply" are run on three fixtures plus a UTF-16 (Excel "Unicode Text") conversion of one of them. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-14` |
 | **Verdict** | ✅ PASS |
 

@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | Each audit record carries the SHA-256 of the previous record, so editing, deleting or inserting a line is detected by "umc log verify" (and each record's hash is also sent to journald where available). |
 | **Method** | 10 operations are logged; the chain is verified; then one record is edited, one is deleted, and one is inserted, verifying after each. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-13` |
 | **Verdict** | ✅ PASS |
 

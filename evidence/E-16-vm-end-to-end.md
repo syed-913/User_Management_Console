@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | On real VMs with systemd, sshd, PAM and (on RHEL-family boxes) SELinux in enforcing mode, the full test-suite passes, account files keep their SELinux labels, a UMC lock refuses SSH public-key logins that a "!"-only lock lets through, journald receives structured records, and the sweep timer installs. |
 | **Method** | `tests/vagrant/verify.sh libvirt` boots each pinned box, runs `tests/run.sh` inside it with `UMC_E2E=1` (unit, integration, live and end-to-end tests), destroys the VM and removes what the run downloaded. |
-| **Environment** | Vagrant 2.4.9 · vagrant-libvirt 0.12.2 · host Ubuntu 24.04.5 LTS · UMC `d570975` · 2026-09-30 |
+| **Environment** | Vagrant 2.4.9 · vagrant-libvirt 0.12.2 · host Ubuntu 24.04.5 LTS · UMC `2fa40c9` · 2026-09-30 |
 | **Reproduce** | `tests/vagrant/verify.sh libvirt rhel9 rocky9 alma9 debian12 debian13 ubuntu2204 ubuntu2404` |
 | **Verdict** | ✅ PASS |
 

@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | A generated temporary password must be changed within the deadline (24 h by default). "umc sweep" locks accounts that miss it and erases their credential-slip entries; accounts whose user changed the password are activated. A shadow expiry date is a backstop even if the sweep never runs. |
 | **Method** | Two users get temporary passwords. One "changes" it (last-change date updated). The sweep runs with a simulated clock (UMC_NOW, honoured only in --root sandboxes) one minute before and one minute after the deadline. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-15` |
 | **Verdict** | ✅ PASS |
 

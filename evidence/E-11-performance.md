@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | With the same hashing algorithm on both sides and all CPU cores available, "umc apply" creates 1,000 users (password hash and home directory each) faster than a useradd loop and than newusers, because it pays its fixed costs once per batch and hashes in parallel. Limits, measured below too: on one core UMC stays ahead of the useradd loop but newusers is faster with yescrypt (UMC starts one mkpasswd per hash), and for a single user useradd is much faster. |
 | **Method** | Every run starts from the same fresh /etc in the same container. Each 1,000-user method runs once on all CPU cores and once pinned to one core (taskset). The algorithm column is read from the hashes actually written, and users, hashes and home directories are counted, so no method gets credit for work it skipped. Single user: average of 20 runs. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-11` |
 | **Verdict** | ✅ PASS |
 

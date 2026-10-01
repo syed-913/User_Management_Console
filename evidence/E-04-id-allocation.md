@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | v1 reused a new user's UID as its GID without checking /etc/group, so a new user could land in an existing group (here: docker), and its bulk import counted 'nobody' and assigned UIDs from 65535 upwards; v2 allocates an ID that is free as both UID and GID inside login.defs' UID_MIN..UID_MAX. |
 | **Method** | A docker group is created at GID 1001 (the next free UID). One user is created with v1 and one with v2; then two users are bulk-imported with v1's CSV import and with v2's apply. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-04` |
 | **Verdict** | ✅ PASS |
 

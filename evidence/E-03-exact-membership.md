@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | v1 removed group members with a substring regex, so deleting user bob rewrote bobby to "by" and bobcat to "cat"; v2 edits member lists by exact name. |
 | **Method** | Users bob, bobby and bobcat are created with shadow-utils and put into group devs. bob is deleted with v1 (menu input on stdin) and, from the same starting state, with v2. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-03` |
 | **Verdict** | ✅ PASS |
 

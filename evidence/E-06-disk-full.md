@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | When the filesystem fills up at any point of a transaction, UMC stops with a clear message and the account files are left exactly as they were (or, if the commit finished, exactly as intended) - never half-written. |
 | **Method** | The sandbox lives on a 3 MB tmpfs. For every amount of free space from 0 to 200 KB (in 4 KB steps) the disk is filled to that point and "umc user create" is attempted; the outcome and the state of the files are checked each time. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-06` |
 | **Verdict** | ✅ PASS |
 

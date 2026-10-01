@@ -328,7 +328,7 @@ chroot, a test fixture) instead of `/`.
 | Ubuntu 24.04 | ✅ | ✅ | |
 
 VM results are from one run of `tests/vagrant/verify.sh libvirt` on 2026-09-30
-(UMC `d570975`, vagrant-libvirt 0.12.2): the container suite plus four end-to-end
+(UMC `2fa40c9`, vagrant-libvirt 0.12.2): the container suite plus four end-to-end
 tests (SELinux labels, SSH key login refused by a UMC lock, journald, systemd
 timer). Two tests skip on every VM, as designed: one checks the "no systemd"
 error path, and either the SELinux test (no SELinux on Debian/Ubuntu) or the

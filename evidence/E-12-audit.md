@@ -4,7 +4,7 @@
 |---|---|
 | **Claim** | "umc audit" detects common account misconfigurations, maps them to CIS Benchmark control titles, and returns exit code 10 with --fail-on so CI and monitoring can act on it. |
 | **Method** | A sandbox is seeded with 8 known problems; the audit is run in text and JSON form and with --fail-on high. |
-| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `9c1a154` · 2026-09-30 |
+| **Environment** | Debian GNU/Linux 12 (bookworm) · bash 5.2.15 · flock from util-linux 2.38.1 · 12 CPU(s) · UMC `0f07bf3` · 2026-09-30 |
 | **Reproduce** | `UMC_POC_DISTRO=debian12 poc/run.sh E-12` |
 | **Verdict** | ✅ PASS |
 
